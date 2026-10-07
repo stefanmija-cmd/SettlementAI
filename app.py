@@ -90,39 +90,58 @@ def parse_copied_data(text):
     return matches
 
 # ==========================================
-# 3. FUZZY MATCHING & LIVE FEED
+# 3. SOFASCORE & EXTRA FEED INTEGRACIJA
 # ==========================================
 def are_teams_matching(home1, away1, home2, away2):
-    """Proverava tekstualnu sličnost timova (prag 70%)."""
+    """Proverava tekstualnu sličnost timova (prag 68%)."""
     sim_home = fuzz.partial_ratio(home1.lower(), home2.lower())
     sim_away = fuzz.partial_ratio(away1.lower(), away2.lower())
-    return ((sim_home + sim_away) / 2) > 70
+    return ((sim_home + sim_away) / 2) > 68
 
 @st.cache_data(ttl=30)
-def fetch_livescore_web_data():
+def fetch_sofascore_live_events():
     """
-    Povlači trenutne live utakmice direktno sa javnog livescore feed-a.
+    Povlači trenutne live utakmice direktno sa SofaScore API-ja.
     """
-    url = "https://nowgoal.com/"
+    url = "https://api.sofascore.com/api/v1/sport/football/events/live"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.sofascore.com/"
     }
     try:
         res = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        # Alternativno vraćanje liste za poređenje
-        return []
+        if res.status_code == 200:
+            return res.json().get("events", [])
     except Exception:
-        return []
+        pass
+    return []
 
 def fetch_external_live_data(match_id, home, away, api_key=None):
     """
-    Pretražuje eksterne izvore za live mečeve.
+    Pretražuje SofaScore i RapidAPI za live mečeve.
     """
     if not home or not away:
         return {"ext_score": "N/A", "status": "N/A"}
 
-    # Ako je unet RapidAPI ključ
+    # 1. Provera preko SofaScore API-ja
+    sofa_events = fetch_sofascore_live_events()
+    for ev in sofa_events:
+        ss_home = ev.get("homeTeam", {}).get("name", "")
+        ss_away = ev.get("awayTeam", {}).get("name", "")
+        
+        if are_teams_matching(home, away, ss_home, ss_away):
+            home_score = ev.get("homeScore", {}).get("current", 0)
+            away_score = ev.get("awayScore", {}).get("current", 0)
+            status_description = ev.get("status", {}).get("description", "Live")
+            
+            return {
+                "ext_score": f"{home_score}:{away_score}",
+                "status": f"{status_description} (SofaScore)"
+            }
+
+    # 2. Provera preko RapidAPI ključa (kao rezervna opcija ako je unet)
     if api_key and len(api_key.strip()) > 5:
         url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
         headers = {
@@ -141,7 +160,7 @@ def fetch_external_live_data(match_id, home, away, api_key=None):
                         gh = fix["goals"]["home"]
                         ga = fix["goals"]["away"]
                         elapsed = fix["fixture"]["status"]["elapsed"]
-                        return {"ext_score": f"{gh}:{ga}", "status": f"{elapsed}' (Live)"}
+                        return {"ext_score": f"{gh}:{ga}", "status": f"{elapsed}' (API-Football)"}
         except Exception:
             pass
 
@@ -151,7 +170,7 @@ def fetch_external_live_data(match_id, home, away, api_key=None):
 # 4. KORISNIČKI INTERFEJS & PRIKAZ TABELE
 # ==========================================
 st.title("⚽ Settlement Live Checker & Mismatch Detector")
-st.caption("Automatska verifikacija live rezultata i detekcija neslaganja sa eksternim izvorima.")
+st.caption("Automatska verifikacija live rezultata sa SofaScore-a i detekcija neslaganja.")
 
 # Sajdbar
 st.sidebar.header("⚙️ Podešavanja")
@@ -179,46 +198,3 @@ if raw_text:
             ext_data = fetch_external_live_data(m["ID"], m["Home"], m["Away"], api_key_input)
             ext_score = ext_data["ext_score"]
             my_score = m["Moj Sistem Rezultat"]
-            
-            if ext_score == "N/A":
-                status_check = "NEMA PODATAKA (N/A)"
-            elif my_score != ext_score:
-                status_check = "MISMATCH (NESLAGANJE)"
-                has_mismatch = True
-            else:
-                status_check = "OK"
-            
-            results.append({
-                "Status": status_check,
-                "ID": m["ID"],
-                "Oznaka": m["Oznaka"],
-                "Liga": m["Liga"],
-                "Meč": m["Meč"],
-                "Tvoj Sistem": my_score,
-                "Teren / Live Feed": ext_score,
-                "Status Meča": ext_data["status"]
-            })
-            
-        df = pd.DataFrame(results)
-        
-        if only_mismatches:
-            df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
-            
-        if has_mismatch and sound_alert:
-            st.audio("https://www.soundjay.com/buttons/sounds/beep-07a.mp3", autoplay=True)
-            st.error("🚨 DETEKTOVANO JE NESLAGANJE REZULTATA!")
-            
-        def highlight_status(val):
-            if val == "MISMATCH (NESLAGANJE)":
-                return 'background-color: #d32f2f; color: white; font-weight: bold;'
-            elif val == "NEMA PODATAKA (N/A)":
-                return 'background-color: #4a4a4a; color: #d1d1d1;'
-            elif val == "OK":
-                return 'background-color: #2e7d32; color: white; font-weight: bold;'
-            return ''
-
-        st.subheader(f"📊 Pregled utakmica ({len(df)})")
-        st.dataframe(
-            df.style.map(highlight_status, subset=['Status']), 
-            use_container_width=True
-        )
