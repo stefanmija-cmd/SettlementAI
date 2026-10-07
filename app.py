@@ -140,4 +140,77 @@ def fetch_external_live_data(match_id, home, away, api_key=None):
 # 4. KORISNIČKI INTERFEJS & PRIKAZ TABELE
 # ==========================================
 st.title("⚽ Settlement Live Checker & Mismatch Detector")
-st.caption("Automatska verifikacija live
+st.caption("Automatska verifikacija live rezultata i detekcija neslaganja sa eksternim izvorima.")
+
+# Sajdbar
+st.sidebar.header("⚙️ Podešavanja")
+api_key_input = st.sidebar.text_input("RapidAPI Ključ (Opciono):", type="password")
+only_mismatches = st.sidebar.checkbox("Prikaži samo neslaganja", value=False)
+sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
+
+if st.sidebar.button("Odjavi se"):
+    st.session_state["authenticated"] = False
+    st.rerun()
+
+# Unos teksta
+raw_text = st.text_area("Zalepite tabelu kopiranu iz vašeg programa (Ctrl + V):", height=180)
+
+if raw_text:
+    parsed_matches = parse_copied_data(raw_text)
+    
+    if not parsed_matches:
+        st.warning("⚠️ Nije prepoznata struktura teksta. Proverite da li ste dobro kopirali tabelu.")
+    else:
+        results = []
+        has_mismatch = False
+        
+        for m in parsed_matches:
+            ext_data = fetch_external_live_data(m["ID"], m["Home"], m["Away"], api_key_input)
+            ext_score = ext_data["ext_score"]
+            my_score = m["Moj Sistem Rezultat"]
+            
+            # Određivanje statusa na osnovu eksternog rezultata
+            if ext_score == "N/A":
+                status_check = "NEMA PODATAKA (N/A)"
+            elif my_score != ext_score:
+                status_check = "MISMATCH (NESLAGANJE)"
+                has_mismatch = True
+            else:
+                status_check = "OK"
+            
+            results.append({
+                "Status": status_check,
+                "ID": m["ID"],
+                "Oznaka": m["Oznaka"],
+                "Liga": m["Liga"],
+                "Meč": m["Meč"],
+                "Tvoj Sistem": my_score,
+                "Teren / Live Feed": ext_score,
+                "Status Meča": ext_data["status"]
+            })
+            
+        df = pd.DataFrame(results)
+        
+        if only_mismatches:
+            df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
+            
+        # Zvučni alarm za neslaganje
+        if has_mismatch and sound_alert:
+            st.audio("https://www.soundjay.com/buttons/sounds/beep-07a.mp3", autoplay=True)
+            st.error("🚨 DETEKTOVANO JE NESLAGANJE REZULTATA!")
+            
+        # Bojenje redova
+        def highlight_status(val):
+            if val == "MISMATCH (NESLAGANJE)":
+                return 'background-color: #d32f2f; color: white; font-weight: bold;'
+            elif val == "NEMA PODATAKA (N/A)":
+                return 'background-color: #4a4a4a; color: #d1d1d1;'
+            elif val == "OK":
+                return 'background-color: #2e7d32; color: white; font-weight: bold;'
+            return ''
+
+        st.subheader(f"📊 Pregled utakmica ({len(df)})")
+        st.dataframe(
+            df.style.map(highlight_status, subset=['Status']), 
+            use_container_width=True
+        )
