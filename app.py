@@ -5,7 +5,7 @@ import requests
 from thefuzz import fuzz
 
 # ==========================================
-# 1. PODEŠAVANJE STRANICE I AUTHORIZACIJA
+# 1. PODEŠAVANJE STRANICE I AUTORIZACIJA
 # ==========================================
 st.set_page_config(
     page_title="Settlement Live Checker", 
@@ -55,24 +55,22 @@ def parse_copied_data(text):
                 home = lines[idx + 1] if idx + 1 < len(lines) else ""
                 away = lines[idx + 2] if idx + 2 < len(lines) else ""
                 
-                # Traženje rezultata u tvojoj tabeli:
-                # 1. Prvo tražimo format X:Y (npr. 1:0)
+                # Traženje rezultata u tvojoj tabeli
                 my_score = "N/A"
                 for j in range(idx, min(idx + 15, len(lines))):
                     if re.match(r'^\d+:\d+$', lines[j]):
                         my_score = lines[j]
                         break
                 
-                # 2. Ako nema format X:Y, tražimo dva uzastopna broja (Home i Away golovi)
+                # Ako nema formata X:Y, traže se dva uzastopna broja (Home i Away golovi)
                 if my_score == "N/A":
                     for j in range(idx + 3, min(idx + 12, len(lines) - 1)):
                         if lines[j].isdigit() and lines[j+1].isdigit():
-                            # Izbegavamo min/vreme i uzimamo rezultat
                             if len(lines[j]) <= 2 and len(lines[j+1]) <= 2:
                                 my_score = f"{lines[j]}:{lines[j+1]}"
                                 break
                 
-                # Oznaka A ili M
+                # Oznaka A ili M sa ispravnom indentacijom
                 block_lines = lines[idx:min(idx + 18, len(lines))]
                 auto_check = "A" if "A" in block_lines else ("M" if "M" in block_lines else "M")
                 
@@ -89,40 +87,18 @@ def parse_copied_data(text):
                 continue
                 
     return matches
-                
-                # Pretraga oznake A ili M
-                block_lines = lines[idx:min(idx + 15, len(lines))]
-                auto_check = "A" if "A" in block_lines else ("M" if "M" in block_lines else "M")
-                
-                matches.append({
-                    "ID": match_id,
-                    "Liga": league,
-                    "Home": home,
-                    "Away": away,
-                    "Meč": f"{home} - {away}",
-                    "Vreme": lines[idx + 3] if idx + 3 < len(lines) else "",
-                    "Moj Sistem Rezultat": score,
-                    "Oznaka": auto_check
-                })
-            except Exception:
-                continue
-                
-    return matches
 
 # ==========================================
-# 3. FUZZY MATCHING & LIVE FEED / API Pozivi
+# 3. FUZZY MATCHING & LIVE FEED
 # ==========================================
 def are_teams_matching(home1, away1, home2, away2):
-    """Proverava tekstualnu sličnost timova (prag 75%)."""
+    """Proverava tekstualnu sličnost timova."""
     sim_home = fuzz.partial_ratio(home1.lower(), home2.lower())
     sim_away = fuzz.partial_ratio(away1.lower(), away2.lower())
     return ((sim_home + sim_away) / 2) > 75
 
 def fetch_external_live_data(match_id, home, away, api_key=None):
-    """
-    Povlači live podatke preko RapidAPI-ja (ako postoji ključ) ili preko besplatnog serivsa.
-    """
-    # 1. Ako je unet RapidAPI ključ
+    """Povlači live podatke sa API-ja ako je ključ dostupan."""
     if api_key and len(api_key.strip()) > 5:
         url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
         headers = {
@@ -146,25 +122,10 @@ def fetch_external_live_data(match_id, home, away, api_key=None):
         except Exception:
             pass
 
-    # 2. Besplatan fallback live feed preko TheSportsDB
-    try:
-        url = f"https://www.thesportsdb.com/api/v1/json/3/searchevents.php?e={home}_vs_{away}"
-        res = requests.get(url, timeout=3)
-        if res.status_code == 200:
-            data = res.json()
-            if data and data.get("event"):
-                event = data["event"][0]
-                gh = event.get("intHomeScore")
-                ga = event.get("intAwayScore")
-                if gh is not None and ga is not None:
-                    return {"ext_score": f"{gh}:{ga}", "status": "U toku"}
-    except Exception:
-        pass
-
     return {"ext_score": "N/A", "status": "N/A"}
 
 # ==========================================
-# 4. KORISNIČKI INTERFEJS & PRIKAZ TABELE
+# 4. KORISNIČKI INTERFEJS
 # ==========================================
 st.title("⚽ Settlement Live Checker & Mismatch Detector")
 st.caption("Automatska verifikacija live rezultata i detekcija neslaganja sa eksternim izvorima.")
@@ -196,7 +157,6 @@ if raw_text:
             ext_score = ext_data["ext_score"]
             my_score = m["Moj Sistem Rezultat"]
             
-            # Određivanje statusa na osnovu eksternog rezultata
             if ext_score == "N/A":
                 status_check = "NEMA PODATAKA (N/A)"
             elif my_score != ext_score:
@@ -221,12 +181,10 @@ if raw_text:
         if only_mismatches:
             df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
             
-        # Zvučni alarm za neslaganje
         if has_mismatch and sound_alert:
             st.audio("https://www.soundjay.com/buttons/sounds/beep-07a.mp3", autoplay=True)
             st.error("🚨 DETEKTOVANO JE NESLAGANJE REZULTATA!")
             
-        # Bojenje redova
         def highlight_status(val):
             if val == "MISMATCH (NESLAGANJE)":
                 return 'background-color: #d32f2f; color: white; font-weight: bold;'
