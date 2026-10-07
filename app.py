@@ -3,14 +3,13 @@ import pandas as pd
 import re
 import requests
 import time
-import json
 from thefuzz import fuzz
 
 # ==========================================
 # 1. PODEŠAVANJE STRANICE I AUTORIZACIJA
 # ==========================================
 st.set_page_config(
-    page_title="SettlementAI", 
+    page_title="Settlement Live Checker Pro", 
     page_icon="⚽", 
     layout="wide"
 )
@@ -37,7 +36,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 2. AUDIO ALARM (STABILAN ZVUK)
+# 2. AUDIO ALARM
 # ==========================================
 def play_sound_alarm():
     audio_html = """
@@ -48,7 +47,7 @@ def play_sound_alarm():
     st.markdown(audio_html, unsafe_allow_html=True)
 
 # ==========================================
-# 3. REČNIK SINONIMA I NORMALIZACIJA TIMOVA
+# 3. REČNIK SINONIMA I NORMALIZACIJA
 # ==========================================
 TEAM_ALIASES = {
     "red star": "crvena zvezda",
@@ -62,16 +61,11 @@ TEAM_ALIASES = {
 }
 
 def normalize_team_name(name):
-    """Sve malim slovima, uklanjanje prefiksa/sufiksa i zamena iz rečnika sinonima."""
     name = name.lower().strip()
     name = re.sub(r'\b(fc|fk|u19|u21|club|cd|sc|sp|sporting)\b', '', name, flags=re.IGNORECASE).strip()
     return TEAM_ALIASES.get(name, name)
 
 def are_teams_matching(home1, away1, home2, away2):
-    """
-    Stroža provera: Obavezno i Domaćin I Gost moraju preći prag od 75% podudaranja
-    kako bi se izbeglo pogrešno spajanje gradskih rivala ili kluba sa sličnim imenom.
-    """
     h1 = normalize_team_name(home1)
     a1 = normalize_team_name(away1)
     h2 = normalize_team_name(home2)
@@ -140,7 +134,7 @@ def parse_copied_data(text):
     return matches
 
 # ==========================================
-# 5. API POZIVI I DATA FETCHING
+# 5. API POZIVI
 # ==========================================
 @st.cache_data(ttl=86400)
 def fetch_all_live_fixtures(api_key):
@@ -168,7 +162,6 @@ def fetch_external_live_data(home, away, match_id, live_fixtures, manual_overrid
     if not home or not away or not live_fixtures:
         return {"ext_score": "N/A", "status": "N/A"}
 
-    # 1. PROVERA RUČNOG MAPIRANJA (MANUAL OVERRIDE)
     if match_id in manual_overrides and manual_overrides[match_id].get("override_search"):
         search_term = manual_overrides[match_id]["override_search"].lower()
         for fix in live_fixtures:
@@ -185,7 +178,6 @@ def fetch_external_live_data(home, away, match_id, live_fixtures, manual_overrid
                     "status": f"{elapsed}' (Ručno spojeno)"
                 }
 
-    # 2. AUTOMATSKO SPAJANJE SA DVOSTRUKOM PROVEROM (75%+)
     for fix in live_fixtures:
         ext_home = fix.get("teams", {}).get("home", {}).get("name", "")
         ext_away = fix.get("teams", {}).get("away", {}).get("name", "")
@@ -202,9 +194,9 @@ def fetch_external_live_data(home, away, match_id, live_fixtures, manual_overrid
     return {"ext_score": "N/A", "status": "N/A"}
 
 # ==========================================
-# 6. INTERFEJS I GLAVNA LOGIKA
+# 6. INTERFEJS I LOGIKA
 # ==========================================
-st.title("⚽ SettlementAI")
+st.title("⚽ Settlement Live Checker Pro")
 
 st.sidebar.header("⚙️ Podešavanja")
 
@@ -230,14 +222,11 @@ if refresh_mode == "Automatsko":
     auto_interval = st.sidebar.slider("Interval (sekunde):", 15, 300, 60, 15)
     st.sidebar.warning(f"⚠️ Troši 1 API zahtev svakih {auto_interval}s.")
 
-only_mismatches = st.sidebar.checkbox("Prikaži samo neslaganja", value=False)
 sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
 
-# MANUAL OVERRIDE SEKCIJA U SAJDBARU
+# MANUAL OVERRIDE
 st.sidebar.markdown("---")
 st.sidebar.subheader("🛠️ Ručno spajanje (Override)")
-st.sidebar.caption("Ako sistem promaši tim, upišite ID meča i deo zvaničnog imena tima sa API-ja:")
-
 override_match_id = st.sidebar.text_input("ID meča iz tvog sistema (npr. 1234):")
 override_team_search = st.sidebar.text_input("Naziv tima na API-ju (npr. Red Star):")
 
@@ -261,24 +250,38 @@ if st.sidebar.button("Odjavi se"):
     st.session_state["authenticated"] = False
     st.rerun()
 
-# UNOS TEKSTA
-raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160)
+# INICIJALIZACIJA STANJA ZA OBRADU
+if "process_triggered" not in st.session_state:
+    st.session_state["process_triggered"] = False
 
-if refresh_mode == "Manuelno (Ručno)":
-    col1, _ = st.columns([1, 3])
-    with col1:
-        if st.button("🔄 Osveži live feed", type="primary"):
-            st.cache_data.clear()
-            st.toast("Podaci osveženi!", icon="🚀")
-else:
+# UNOS TEKSTA
+raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160, key="raw_text_input")
+
+# DUGMAD ZA KONTROLU
+col_btn1, col_btn2, _ = st.columns([2, 1, 3])
+
+with col_btn1:
+    # VELIKO DUGME ZA POkRETANJE PROVERE
+    if st.button("🚀 Učitaj i proveri tabelu", type="primary", use_container_width=True):
+        st.session_state["process_triggered"] = True
+        st.cache_data.clear()
+
+with col_btn2:
+    if st.button("🗑️ Očisti tekst", use_container_width=True):
+        st.session_state["process_triggered"] = False
+        st.rerun()
+
+if refresh_mode == "Automatsko":
+    st.session_state["process_triggered"] = True
     st.cache_data.clear()
     time.sleep(0.1)
 
-if raw_text:
+# OBRADA PODATAKA
+if raw_text and st.session_state["process_triggered"]:
     parsed_matches = parse_copied_data(raw_text)
     
     if not parsed_matches:
-        st.warning("⚠️ Nije prepoznata struktura teksta.")
+        st.warning("⚠️ Nije prepoznata struktura teksta. Proverite uslov kopiranja.")
     else:
         live_games, remaining_reqs = fetch_all_live_fixtures(api_key_input) if api_key_input else ([], "N/A")
         
@@ -326,15 +329,24 @@ if raw_text:
             
         df = pd.DataFrame(results)
         
-        # STATISTIKA NA VRHU
+        # METRIKE NA VRHU
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Ukupno mečeva", len(df))
         m2.metric("Usklađeno (OK)", count_ok)
         m3.metric("Neslaganja (MISMATCH)", count_mismatch, delta_color="inverse")
         m4.metric("Nema podataka (N/A)", count_na)
         
-        if only_mismatches:
+        # BRZI FILTERI
+        filter_status = st.radio(
+            "Filtriraj prikaz:", 
+            ["Svi mečevi", "Samo Neslaganja (MISMATCH)", "Samo Nema Podataka (N/A)"], 
+            horizontal=True
+        )
+        
+        if filter_status == "Samo Neslaganja (MISMATCH)":
             df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
+        elif filter_status == "Samo Nema Podataka (N/A)":
+            df = df[df["Status"] == "NEMA PODATAKA (N/A)"]
             
         if has_mismatch and sound_alert:
             play_sound_alarm()
@@ -363,9 +375,25 @@ if raw_text:
             mime="text/csv"
         )
 
+        # LIVE MONITOR - PRIKAZ SVIH API LIVE UTKMICA
+        with st.expander("📺 Pregled svih trenutno aktivnih live utakmica na API-ju"):
+            if live_games:
+                live_list = []
+                for lg in live_games:
+                    live_list.append({
+                        "Liga": lg.get("league", {}).get("name", ""),
+                        "Domaćin": lg.get("teams", {}).get("home", {}).get("name", ""),
+                        "Gost": lg.get("teams", {}).get("away", {}).get("name", ""),
+                        "Rezultat": f"{lg.get('goals',{}).get('home',0)}:{lg.get('goals',{}).get('away',0)}",
+                        "Minut": lg.get("fixture", {}).get("status", {}).get("elapsed", "Live")
+                    })
+                st.dataframe(pd.DataFrame(live_list), use_container_width=True)
+            else:
+                st.info("Nema učitanih live utakmica sa API-ja.")
+
         with st.expander("🔍 Dijagnostika i sirovi parsirani podaci"):
             st.json(parsed_matches)
 
-if refresh_mode == "Automatsko":
+if refresh_mode == "Automatsko" and st.session_state["process_triggered"]:
     time.sleep(auto_interval)
     st.rerun()
