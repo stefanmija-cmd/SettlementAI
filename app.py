@@ -10,7 +10,7 @@ from thefuzz import fuzz
 # 1. PODEŠAVANJE STRANICE I AUTORIZACIJA
 # ==========================================
 st.set_page_config(
-    page_title="Settlement Live Checker Pro", 
+    page_title="SettlementAI", 
     page_icon="⚽", 
     layout="wide"
 )
