@@ -204,4 +204,15 @@ if raw_text:
             
         def highlight_status(val):
             if val == "MISMATCH (NESLAGANJE)":
-                return 'background-
+                return 'background-color: #d32f2f; color: white; font-weight: bold;'
+            elif val == "NEMA PODATAKA (N/A)":
+                return 'background-color: #4a4a4a; color: #d1d1d1;'
+            elif val == "OK":
+                return 'background-color: #2e7d32; color: white; font-weight: bold;'
+            return ''
+
+        st.subheader(f"📊 Pregled utakmica ({len(df)})")
+        st.dataframe(
+            df.style.map(highlight_status, subset=['Status']), 
+            use_container_width=True
+        )
