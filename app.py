@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import requests
+import time
 from thefuzz import fuzz
 
 # ==========================================
@@ -13,7 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
-PASSWORD = "Delije1989"
+PASSWORD = "settlement123"
 
 def check_password():
     if "authenticated" not in st.session_state:
@@ -80,40 +81,31 @@ def parse_copied_data(text):
     return matches
 
 # ==========================================
-# 3. API-FOOTBALL (v3.football.api-sports.io)
+# 3. API POZIV SA KEŠIRANJEM
 # ==========================================
 def are_teams_matching(home1, away1, home2, away2):
-    """Provera sličnosti naziva timova sa pragom od 68%."""
     sim_home = fuzz.partial_ratio(home1.lower(), home2.lower())
     sim_away = fuzz.partial_ratio(away1.lower(), away2.lower())
     return ((sim_home + sim_away) / 2) > 68
 
-@st.cache_data(ttl=120)  # Kešira odgovor na 2 minuta da sačuva besplatne kvote/pozive
+@st.cache_data(ttl=86400)
 def fetch_all_live_fixtures(api_key):
-    """
-    Uputi SAMO JEDAN poziv prema v3.football.api-sports.io 
-    i preuzme SVE mečeve koji se trenutno igraju u svetu.
-    """
     if not api_key:
         return []
         
     url = "https://v3.football.api-sports.io/fixtures"
-    headers = {
-        "x-apisports-key": api_key.strip()
-    }
+    headers = {"x-apisports-key": api_key.strip()}
     params = {"live": "all"}
     
     try:
         res = requests.get(url, headers=headers, params=params, timeout=6)
         if res.status_code == 200:
-            data = res.json()
-            return data.get("response", [])
+            return res.json().get("response", [])
     except Exception:
         pass
     return []
 
 def fetch_external_live_data(home, away, live_fixtures):
-    """Lokalno pretražuje već preuzete live mečeve bez trošenja novih API zahteva."""
     if not home or not away or not live_fixtures:
         return {"ext_score": "N/A", "status": "N/A"}
 
@@ -125,7 +117,6 @@ def fetch_external_live_data(home, away, live_fixtures):
             gh = fix.get("goals", {}).get("home", 0)
             ga = fix.get("goals", {}).get("away", 0)
             
-            # Ako iz nekog razloga golovi budu None umesto broja
             gh = 0 if gh is None else gh
             ga = 0 if ga is None else ga
             
@@ -138,18 +129,36 @@ def fetch_external_live_data(home, away, live_fixtures):
     return {"ext_score": "N/A", "status": "N/A"}
 
 # ==========================================
-# 4. KORISNIČKI INTERFEJS
+# 4. KORISNIČKI INTERFEJS I PODEŠAVANJA OSVEŽAVANJA
 # ==========================================
 st.title("⚽ Settlement Live Checker")
-st.caption("Verifikacija rezultata preko v3.football.api-sports.io")
 
 st.sidebar.header("⚙️ Podešavanja")
-api_key_input = st.sidebar.text_input("API-Sports Ključ (x-apisports-key):", type="password")
+api_key_input = st.sidebar.text_input("API-Sports Ključ:", type="password")
+
+st.sidebar.subheader("🔄 Osvežavanje podataka")
+refresh_mode = st.sidebar.radio(
+    "Režim osvežavanja:",
+    ["Manuelno (Ručno)", "Automatsko"],
+    index=0
+)
+
+auto_interval = 60
+if refresh_mode == "Automatsko":
+    auto_interval = st.sidebar.slider(
+        "Interval osvežavanja (u sekundama):",
+        min_value=15,
+        max_value=300,
+        value=60,
+        step=15
+    )
+    st.sidebar.warning(f"⚠️ Automatsko osvežavanje troši 1 API zahtev svakih {auto_interval} sekundi.")
+
 only_mismatches = st.sidebar.checkbox("Prikaži samo neslaganja", value=False)
 sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
 
 if not api_key_input:
-    st.info("💡 Unesite tvoj API ključ sa `api-sports.io` u sajdbaru sa leve strane da omogućiš sinhronizaciju.")
+    st.info("💡 Unesite API ključ sa `api-sports.io` u sajdbaru.")
 
 if st.sidebar.button("Odjavi se"):
     st.session_state["authenticated"] = False
@@ -157,13 +166,26 @@ if st.sidebar.button("Odjavi se"):
 
 raw_text = st.text_area("Zalepite tabelu iz programa (Ctrl + V):", height=180)
 
+# KONTROLA MANUELNOG ILI AUTOMATSKOG OSVEŽAVANJA
+refresh_clicked = False
+if refresh_mode == "Manuelno (Ručno)":
+    col1, _ = st.columns([1, 3])
+    with col1:
+        if st.button("🔄 Osveži live feed", type="primary"):
+            st.cache_data.clear()
+            refresh_clicked = True
+            st.toast("Podaci osveženi!", icon="🚀")
+else:
+    # Ako je automatsko, obriši keš i sačekaj zadati interval
+    st.cache_data.clear()
+    time.sleep(0.1)
+
 if raw_text:
     parsed_matches = parse_copied_data(raw_text)
     
     if not parsed_matches:
         st.warning("⚠️ Nije prepoznata struktura teksta.")
     else:
-        # Preuzimamo sve live utakmice samo JEDNOM u 2 minuta
         live_games = fetch_all_live_fixtures(api_key_input) if api_key_input else []
         
         results = []
@@ -216,3 +238,8 @@ if raw_text:
             df.style.map(highlight_status, subset=['Status']), 
             use_container_width=True
         )
+
+# Tajmer za automatsko ponovno pokretanje skripte kada je uključen automatski režim
+if refresh_mode == "Automatsko":
+    time.sleep(auto_interval)
+    st.rerun()
