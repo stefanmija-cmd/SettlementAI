@@ -89,16 +89,39 @@ def parse_copied_data(text):
     return matches
 
 # ==========================================
-# 3. FUZZY MATCHING & LIVE FEED
+# 3. FUZZY MATCHING & FLASHSCORE LIVE FEED
 # ==========================================
+from fs_football import Flashscore
+
 def are_teams_matching(home1, away1, home2, away2):
-    """Proverava tekstualnu sličnost timova."""
+    """Proverava tekstualnu sličnost timova (prag 70%)."""
     sim_home = fuzz.partial_ratio(home1.lower(), home2.lower())
     sim_away = fuzz.partial_ratio(away1.lower(), away2.lower())
-    return ((sim_home + sim_away) / 2) > 75
+    return ((sim_home + sim_away) / 2) > 70
+
+@st.cache_data(ttl=30)
+def get_flashscore_live_matches():
+    """
+    Povlači sve trenutne live mečeve sa Flashscore-a.
+    Rezultat se kešira na 30 sekundi radi bržeg rada aplikacije.
+    """
+    try:
+        fs = Flashscore()
+        # Povlačenje utakmica koje se igraju uživo
+        live_matches = fs.get_live_matches()
+        return live_matches
+    except Exception as e:
+        st.write(f"Greška pri preuzimanju Flashscore feed-a: {e}")
+        return []
 
 def fetch_external_live_data(match_id, home, away, api_key=None):
-    """Povlači live podatke sa API-ja ako je ključ dostupan."""
+    """
+    Pretražuje aktivne Flashscore utakmice i upoređuje imena timova.
+    """
+    if not home or not away:
+        return {"ext_score": "N/A", "status": "N/A"}
+
+    # 1. Prvo provera ako je unet opcioni RapidAPI ključ
     if api_key and len(api_key.strip()) > 5:
         url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
         headers = {
@@ -113,7 +136,6 @@ def fetch_external_live_data(match_id, home, away, api_key=None):
                 for fix in data["response"]:
                     ext_home = fix["teams"]["home"]["name"]
                     ext_away = fix["teams"]["away"]["name"]
-                    
                     if are_teams_matching(home, away, ext_home, ext_away):
                         gh = fix["goals"]["home"]
                         ga = fix["goals"]["away"]
@@ -122,8 +144,26 @@ def fetch_external_live_data(match_id, home, away, api_key=None):
         except Exception:
             pass
 
-    return {"ext_score": "N/A", "status": "N/A"}
+    # 2. Besplatan Flashscore fallback preko fs-football biblioteke
+    live_games = get_flashscore_live_matches()
+    
+    if live_games:
+        for game in live_games:
+            # fs-football obično vraća atribute ili rečnik sa nazivima timova i rezultatima
+            ext_home = getattr(game, 'home_team', '') or game.get('home_team', '')
+            ext_away = getattr(game, 'away_team', '') or game.get('away_team', '')
+            
+            if are_teams_matching(home, away, str(ext_home), str(ext_away)):
+                home_score = getattr(game, 'home_score', '0') or game.get('home_score', '0')
+                away_score = getattr(game, 'away_score', '0') or game.get('away_score', '0')
+                status = getattr(game, 'time', 'Uživo') or game.get('time', 'Uživo')
+                
+                return {
+                    "ext_score": f"{home_score}:{away_score}", 
+                    "status": str(status)
+                }
 
+    return {"ext_score": "N/A", "status": "N/A"}
 # ==========================================
 # 4. KORISNIČKI INTERFEJS
 # ==========================================
