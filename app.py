@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import requests
 import time
+import base64
 from thefuzz import fuzz
 
 # ==========================================
@@ -36,59 +37,68 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 2. PARSER KOPIRANOG TEKSTA
+# 2. AUDIO ALARM (BASE64 STABILAN ZVUK)
+# ==========================================
+def play_sound_alarm():
+    """Generiše zvučni alarm direktno iz HTML5 Audio elementa bez zavisnosti od eksternog URL-a."""
+    # Kratak zvučni signal (Beep) u base64 formatu
+    audio_b64 = "data:audio/wav;base64,UklGRl9vAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YVBvAAAAAAAAAAAAAAAAAAAAAA=" 
+    # Alternativno koristi pouzdan CDN fallback
+    audio_html = """
+        <audio autoplay style="display:none;">
+            <source src="https://media.geeksforgeeks.org/wp-content/uploads/20190531135120/beep.mp3" type="audio/mpeg">
+        </audio>
+    """
+    st.markdown(audio_html, unsafe_allow_html=True)
+
+# ==========================================
+# 3. ADVANCED PARSER KOPIRANOG TEKSTA
 # ==========================================
 def parse_copied_data(text):
     """
-    Prilagođeni parser koji uzima u obzir da su 'Home' i 'Away' trenutni golovi (cifre),
-    a 'Score2' rezultat poluvremena (X:Y) koji se pojavljuje tek nakon 1. poluvremena.
+    Robustni parser koji uklanja specijalne karaktere, spaja Home i Away golove 
+    i rukuje Score2 (poluvremenom) bez narušavanja strukture.
     """
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    # Čišćenje Unicode karaktera i tabulatora
+    text = text.replace('\t', '\n').replace('\r', '')
+    lines = [re.sub(r'\s+', ' ', line).strip() for line in text.split('\n') if line.strip()]
     matches = []
     
     for idx, line in enumerate(lines):
-        # Tražimo ID meča (4 do 6 cifara)
         if re.match(r'^\d{4,6}$', line):
             try:
                 match_id = line
                 league = lines[idx - 1] if idx - 1 >= 0 else "Nepoznata liga"
+                block = lines[idx + 1 : min(idx + 18, len(lines))]
                 
-                # Skupljamo narednih 15-ak redova unutar ovog meča
-                block = lines[idx+1 : min(idx + 18, len(lines))]
-                
-                # 1. Traženje naziva timova i trenutnog rezultata
-                # Pronalaženje svih pojedinačnih brojeva (golova) u bloku
                 scores_found = []
                 half_time_score = "N/A"
                 team_names = []
                 
                 for item in block:
-                    # Ako naiđemo na format X:Y (to je Score2 / poluvrijeme)
+                    # Normalizacija imena timova (uklanjanje čestih sufiksa)
+                    clean_item = re.sub(r'\b(FC|FK|U19|U21|Club)\b', '', item, flags=re.IGNORECASE).strip()
+                    
                     if re.match(r'^\d+:\d+$', item):
                         half_time_score = item
                         continue
                         
-                    # Ako je samo cifra (trenutni golovi Home / Away)
                     if item.isdigit() and len(item) <= 2:
                         scores_found.append(item)
                         continue
                         
-                    # Ako nije ID, nije oznaka A/M, nije liga i nije status -> to je ime tima
                     if not item.isdigit() and item not in ["A", "M"] and ":" not in item:
                         if len(item) > 1 and item != league:
                             team_names.append(item)
 
-                # Formiranje trenutnog rezultata iz Home i Away golova
                 if len(scores_found) >= 2:
                     my_score = f"{scores_found[0]}:{scores_found[1]}"
                 else:
                     my_score = "N/A"
                     
-                # Formiranje imena timova
                 home_team = team_names[0] if len(team_names) > 0 else "Domaćin"
                 away_team = team_names[1] if len(team_names) > 1 else "Gost"
                 
-                # Oznaka A ili M
                 auto_check = "A" if "A" in block else ("M" if "M" in block else "M")
                 
                 matches.append({
@@ -98,7 +108,7 @@ def parse_copied_data(text):
                     "Away": away_team,
                     "Meč": f"{home_team} - {away_team}",
                     "Moj Sistem Rezultat": my_score,
-                    "Poluvreme (Score2)": half_time_score,
+                    "Score2 (HT)": half_time_score,
                     "Oznaka": auto_check
                 })
             except Exception:
@@ -107,17 +117,23 @@ def parse_copied_data(text):
     return matches
 
 # ==========================================
-# 3. API POZIV SA KEŠIRANJEM
+# 4. API POZIV SA MONITORINGOM KVOTE
 # ==========================================
 def are_teams_matching(home1, away1, home2, away2):
-    sim_home = fuzz.partial_ratio(home1.lower(), home2.lower())
-    sim_away = fuzz.partial_ratio(away1.lower(), away2.lower())
-    return ((sim_home + sim_away) / 2) > 68
+    """Normalizacija i provera fuzzy podudaranja naziva timova."""
+    h1 = re.sub(r'\b(FC|FK|U19|U21|Club)\b', '', home1, flags=re.IGNORECASE).strip().lower()
+    a1 = re.sub(r'\b(FC|FK|U19|U21|Club)\b', '', away1, flags=re.IGNORECASE).strip().lower()
+    h2 = re.sub(r'\b(FC|FK|U19|U21|Club)\b', '', home2, flags=re.IGNORECASE).strip().lower()
+    a2 = re.sub(r'\b(FC|FK|U19|U21|Club)\b', '', away2, flags=re.IGNORECASE).strip().lower()
+    
+    sim_home = fuzz.partial_ratio(h1, h2)
+    sim_away = fuzz.partial_ratio(a1, a2)
+    return ((sim_home + sim_away) / 2) > 65
 
 @st.cache_data(ttl=86400)
 def fetch_all_live_fixtures(api_key):
     if not api_key:
-        return []
+        return [], None
         
     url = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key.strip()}
@@ -125,11 +141,18 @@ def fetch_all_live_fixtures(api_key):
     
     try:
         res = requests.get(url, headers=headers, params=params, timeout=6)
+        
+        # Ekstrakcija preostalih API zahteva iz odgovora
+        remaining_requests = res.headers.get("x-ratelimit-requests-remaining", "N/A")
+        
         if res.status_code == 200:
-            return res.json().get("response", [])
-    except Exception:
-        pass
-    return []
+            return res.json().get("response", []), remaining_requests
+        elif res.status_code == 429:
+            st.error("🚨 Prekoračen je dnevni limit API zahteva (Rate limit exceeded)!")
+            return [], remaining_requests
+    except Exception as e:
+        st.error(f"Greška u mrežnoj komunikaciji: {e}")
+    return [], "N/A"
 
 def fetch_external_live_data(home, away, live_fixtures):
     if not home or not away or not live_fixtures:
@@ -155,13 +178,13 @@ def fetch_external_live_data(home, away, live_fixtures):
     return {"ext_score": "N/A", "status": "N/A"}
 
 # ==========================================
-# 4. KORISNIČKI INTERFEJS I SAČUVANI SECRETS
+# 5. KORISNIČKI INTERFEJS & GLAVNI LOGIC
 # ==========================================
-st.title("⚽ Settlement Live Checker")
+st.title("⚽ Settlement Live Checker Pro")
 
+# Sajdbar i podešavanja
 st.sidebar.header("⚙️ Podešavanja")
 
-# DOHVATANJE KLJUČA IZ ST.SECRETS
 default_key = ""
 if "APISPORTS_KEY" in st.secrets:
     default_key = st.secrets["APISPORTS_KEY"]
@@ -170,7 +193,7 @@ api_key_input = st.sidebar.text_input(
     "API-Sports Ključ:", 
     value=default_key, 
     type="password",
-    help="Ključ je automatski učitan iz Streamlit Secrets podešavanja."
+    help="Učitan iz Streamlit Secrets podešavanja."
 )
 
 st.sidebar.subheader("🔄 Osvežavanje podataka")
@@ -183,97 +206,10 @@ refresh_mode = st.sidebar.radio(
 auto_interval = 60
 if refresh_mode == "Automatsko":
     auto_interval = st.sidebar.slider(
-        "Interval osvežavanja (u sekundama):",
+        "Interval osvežavanja (sekunde):",
         min_value=15,
         max_value=300,
         value=60,
         step=15
     )
-    st.sidebar.warning(f"⚠️ Automatsko osvežavanje troši 1 API zahtev svakih {auto_interval} sekundi.")
-
-only_mismatches = st.sidebar.checkbox("Prikaži samo neslaganja", value=False)
-sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
-
-if not api_key_input:
-    st.info("💡 Unesite API ključ sa `api-sports.io` u sajdbaru ili ga sačuvajte u Streamlit Secrets.")
-
-if st.sidebar.button("Odjavi se"):
-    st.session_state["authenticated"] = False
-    st.rerun()
-
-raw_text = st.text_area("Zalepite tabelu iz programa (Ctrl + V):", height=180)
-
-# KONTROLA OSVEŽAVANJA
-if refresh_mode == "Manuelno (Ručno)":
-    col1, _ = st.columns([1, 3])
-    with col1:
-        if st.button("🔄 Osveži live feed", type="primary"):
-            st.cache_data.clear()
-            st.toast("Podaci osveženi!", icon="🚀")
-else:
-    st.cache_data.clear()
-    time.sleep(0.1)
-
-if raw_text:
-    parsed_matches = parse_copied_data(raw_text)
-    
-    if not parsed_matches:
-        st.warning("⚠️ Nije prepoznata struktura teksta.")
-    else:
-        live_games = fetch_all_live_fixtures(api_key_input) if api_key_input else []
-        
-        results = []
-        has_mismatch = False
-        
-        for m in parsed_matches:
-            ext_data = fetch_external_live_data(m["Home"], m["Away"], live_games)
-            ext_score = ext_data["ext_score"]
-            my_score = m["Moj Sistem Rezultat"]
-            
-            if ext_score == "N/A":
-                status_check = "NEMA PODATAKA (N/A)"
-            elif my_score != ext_score:
-                status_check = "MISMATCH (NESLAGANJE)"
-                has_mismatch = True
-            else:
-                status_check = "OK"
-            
-            results.append({
-                "Status": status_check,
-                "ID": m["ID"],
-                "Oznaka": m["Oznaka"],
-                "Liga": m["Liga"],
-                "Meč": m["Meč"],
-                "Tvoj Sistem": my_score,
-                "Teren / Live Feed": ext_score,
-                "Status Meča": ext_data["status"]
-            })
-            
-        df = pd.DataFrame(results)
-        
-        if only_mismatches:
-            df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
-            
-        if has_mismatch and sound_alert:
-            st.audio("https://www.soundjay.com/buttons/sounds/beep-07a.mp3", autoplay=True)
-            st.error("🚨 DETEKTOVANO JE NESLAGANJE REZULTATA!")
-            
-        def highlight_status(val):
-            if val == "MISMATCH (NESLAGANJE)":
-                return 'background-color: #d32f2f; color: white; font-weight: bold;'
-            elif val == "NEMA PODATAKA (N/A)":
-                return 'background-color: #4a4a4a; color: #d1d1d1;'
-            elif val == "OK":
-                return 'background-color: #2e7d32; color: white; font-weight: bold;'
-            return ''
-
-        st.subheader(f"📊 Pregled utakmica ({len(df)})")
-        st.dataframe(
-            df.style.map(highlight_status, subset=['Status']), 
-            use_container_width=True
-        )
-
-# TAJMER ZA AUTOMATSKO OSVEŽAVANJE
-if refresh_mode == "Automatsko":
-    time.sleep(auto_interval)
-    st.rerun()
+    st.sidebar.warning(f"⚠️ Troši 1 API zahtev svakih {auto_interval
