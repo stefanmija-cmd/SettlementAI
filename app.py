@@ -212,4 +212,121 @@ if refresh_mode == "Automatsko":
         value=60,
         step=15
     )
-    st.sidebar.warning(f"⚠️ Troši 1 API zahtev svakih {auto_interval
+    st.sidebar.warning(f"⚠️ Troši 1 API zahtev svakih {auto_interval} s.")
+
+only_mismatches = st.sidebar.checkbox("Prikaži samo neslaganja", value=False)
+sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
+
+if st.sidebar.button("Odjavi se"):
+    st.session_state["authenticated"] = False
+    st.rerun()
+
+# Unos teksta
+raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160)
+
+# Kontrola manuelnog osvežavanja
+if refresh_mode == "Manuelno (Ručno)":
+    col1, _ = st.columns([1, 3])
+    with col1:
+        if st.button("🔄 Osveži live feed", type="primary"):
+            st.cache_data.clear()
+            st.toast("Podaci osveženi!", icon="🚀")
+else:
+    st.cache_data.clear()
+    time.sleep(0.1)
+
+if raw_text:
+    parsed_matches = parse_copied_data(raw_text)
+    
+    if not parsed_matches:
+        st.warning("⚠️ Nije prepoznata struktura teksta.")
+    else:
+        live_games, remaining_reqs = fetch_all_live_fixtures(api_key_input) if api_key_input else ([], "N/A")
+        
+        # Prikaz preostale API kvote u sajdbaru
+        if remaining_reqs != "N/A":
+            st.sidebar.info(f"📊 Preostalo API zahteva za danas: **{remaining_reqs}**")
+        
+        results = []
+        has_mismatch = False
+        
+        count_ok = 0
+        count_mismatch = 0
+        count_na = 0
+        
+        for m in parsed_matches:
+            ext_data = fetch_external_live_data(m["Home"], m["Away"], live_games)
+            ext_score = ext_data["ext_score"]
+            my_score = m["Moj Sistem Rezultat"]
+            
+            if ext_score == "N/A":
+                status_check = "NEMA PODATAKA (N/A)"
+                count_na += 1
+            elif my_score != ext_score:
+                status_check = "MISMATCH (NESLAGANJE)"
+                has_mismatch = True
+                count_mismatch += 1
+            else:
+                status_check = "OK"
+                count_ok += 1
+            
+            results.append({
+                "Status": status_check,
+                "ID": m["ID"],
+                "Oznaka": m["Oznaka"],
+                "Liga": m["Liga"],
+                "Meč": m["Meč"],
+                "Tvoj Sistem": my_score,
+                "Score2 (HT)": m["Score2 (HT)"],
+                "Teren / Live Feed": ext_score,
+                "Status Meča": ext_data["status"]
+            })
+            
+        df = pd.DataFrame(results)
+        
+        # Statistički pokazatelji (Metrics) na vrhu
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Ukupno mečeva", len(df))
+        m2.metric("Usklađeno (OK)", count_ok)
+        m3.metric("Neslaganja (MISMATCH)", count_mismatch, delta_color="inverse")
+        m4.metric("Nema podataka (N/A)", count_na)
+        
+        if only_mismatches:
+            df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
+            
+        if has_mismatch and sound_alert:
+            play_sound_alarm()
+            st.error("🚨 DETEKTOVANO JE NESLAGANJE REZULTATA!")
+            
+        def highlight_status(val):
+            if val == "MISMATCH (NESLAGANJE)":
+                return 'background-color: #d32f2f; color: white; font-weight: bold;'
+            elif val == "NEMA PODATAKA (N/A)":
+                return 'background-color: #4a4a4a; color: #d1d1d1;'
+            elif val == "OK":
+                return 'background-color: #2e7d32; color: white; font-weight: bold;'
+            return ''
+
+        st.subheader("📊 Pregled utakmica")
+        st.dataframe(
+            df.style.map(highlight_status, subset=['Status']), 
+            use_container_width=True
+        )
+
+        # Izvoz rezultata u CSV
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Preuzmi izveštaj (CSV)",
+            data=csv,
+            file_name="settlement_mismatch_report.csv",
+            mime="text/csv"
+        )
+
+        # Expander sa sirovim parsiranim podacima radi dijagnostike
+        with st.expander("🔍 Dijagnostika i sirovi parsirani podaci"):
+            st.json(parsed_matches)
+
+# Tajmer za automatsko ponovno pokretanje skripte
+if refresh_mode == "Automatsko":
+    time.sleep(auto_interval)
+    st.rerun()
