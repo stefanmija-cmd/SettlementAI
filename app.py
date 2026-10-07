@@ -70,7 +70,7 @@ def parse_copied_data(text):
                                 my_score = f"{lines[j]}:{lines[j+1]}"
                                 break
                 
-                # Oznaka A ili M sa ispravnom indentacijom
+                # Oznaka A ili M
                 block_lines = lines[idx:min(idx + 18, len(lines))]
                 auto_check = "A" if "A" in block_lines else ("M" if "M" in block_lines else "M")
                 
@@ -91,7 +91,11 @@ def parse_copied_data(text):
 # ==========================================
 # 3. FUZZY MATCHING & FLASHSCORE LIVE FEED
 # ==========================================
-from fs_football import Flashscore
+try:
+    from fs_football import Flashscore
+    FS_AVAILABLE = True
+except ImportError:
+    FS_AVAILABLE = False
 
 def are_teams_matching(home1, away1, home2, away2):
     """Proverava tekstualnu sličnost timova (prag 70%)."""
@@ -101,141 +105,22 @@ def are_teams_matching(home1, away1, home2, away2):
 
 @st.cache_data(ttl=30)
 def get_flashscore_live_matches():
-    """
-    Povlači sve trenutne live mečeve sa Flashscore-a.
-    Rezultat se kešira na 30 sekundi radi bržeg rada aplikacije.
-    """
+    """Povlači sve live mečeve sa Flashscore-a sa keširanjem od 30 sekundi."""
+    if not FS_AVAILABLE:
+        return []
     try:
         fs = Flashscore()
-        # Povlačenje utakmica koje se igraju uživo
-        live_matches = fs.get_live_matches()
-        return live_matches
-    except Exception as e:
-        st.write(f"Greška pri preuzimanju Flashscore feed-a: {e}")
+        return fs.get_live_matches()
+    except Exception:
         return []
 
 def fetch_external_live_data(match_id, home, away, api_key=None):
     """
-    Pretražuje aktivne Flashscore utakmice i upoređuje imena timova.
+    Pretražuje eksterne izvore (RapidAPI ili Flashscore) za live mečeve.
     """
     if not home or not away:
         return {"ext_score": "N/A", "status": "N/A"}
 
-    # 1. Prvo provera ako je unet opcioni RapidAPI ključ
+    # 1. Provera preko opcionog RapidAPI ključa
     if api_key and len(api_key.strip()) > 5:
-        url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
-        headers = {
-            "X-RapidAPI-Key": api_key.strip(),
-            "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
-        }
-        params = {"live": "all"}
-        try:
-            res = requests.get(url, headers=headers, params=params, timeout=5)
-            data = res.json()
-            if "response" in data:
-                for fix in data["response"]:
-                    ext_home = fix["teams"]["home"]["name"]
-                    ext_away = fix["teams"]["away"]["name"]
-                    if are_teams_matching(home, away, ext_home, ext_away):
-                        gh = fix["goals"]["home"]
-                        ga = fix["goals"]["away"]
-                        elapsed = fix["fixture"]["status"]["elapsed"]
-                        return {"ext_score": f"{gh}:{ga}", "status": f"{elapsed}' (Live)"}
-        except Exception:
-            pass
-
-    # 2. Besplatan Flashscore fallback preko fs-football biblioteke
-    live_games = get_flashscore_live_matches()
-    
-    if live_games:
-        for game in live_games:
-            # fs-football obično vraća atribute ili rečnik sa nazivima timova i rezultatima
-            ext_home = getattr(game, 'home_team', '') or game.get('home_team', '')
-            ext_away = getattr(game, 'away_team', '') or game.get('away_team', '')
-            
-            if are_teams_matching(home, away, str(ext_home), str(ext_away)):
-                home_score = getattr(game, 'home_score', '0') or game.get('home_score', '0')
-                away_score = getattr(game, 'away_score', '0') or game.get('away_score', '0')
-                status = getattr(game, 'time', 'Uživo') or game.get('time', 'Uživo')
-                
-                return {
-                    "ext_score": f"{home_score}:{away_score}", 
-                    "status": str(status)
-                }
-
-    return {"ext_score": "N/A", "status": "N/A"}
-# ==========================================
-# 4. KORISNIČKI INTERFEJS
-# ==========================================
-st.title("⚽ Settlement Live Checker & Mismatch Detector")
-st.caption("Automatska verifikacija live rezultata i detekcija neslaganja sa eksternim izvorima.")
-
-# Sajdbar
-st.sidebar.header("⚙️ Podešavanja")
-api_key_input = st.sidebar.text_input("RapidAPI Ključ (Opciono):", type="password")
-only_mismatches = st.sidebar.checkbox("Prikaži samo neslaganja", value=False)
-sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
-
-if st.sidebar.button("Odjavi se"):
-    st.session_state["authenticated"] = False
-    st.rerun()
-
-# Unos teksta
-raw_text = st.text_area("Zalepite tabelu kopiranu iz vašeg programa (Ctrl + V):", height=180)
-
-if raw_text:
-    parsed_matches = parse_copied_data(raw_text)
-    
-    if not parsed_matches:
-        st.warning("⚠️ Nije prepoznata struktura teksta. Proverite da li ste dobro kopirali tabelu.")
-    else:
-        results = []
-        has_mismatch = False
-        
-        for m in parsed_matches:
-            ext_data = fetch_external_live_data(m["ID"], m["Home"], m["Away"], api_key_input)
-            ext_score = ext_data["ext_score"]
-            my_score = m["Moj Sistem Rezultat"]
-            
-            if ext_score == "N/A":
-                status_check = "NEMA PODATAKA (N/A)"
-            elif my_score != ext_score:
-                status_check = "MISMATCH (NESLAGANJE)"
-                has_mismatch = True
-            else:
-                status_check = "OK"
-            
-            results.append({
-                "Status": status_check,
-                "ID": m["ID"],
-                "Oznaka": m["Oznaka"],
-                "Liga": m["Liga"],
-                "Meč": m["Meč"],
-                "Tvoj Sistem": my_score,
-                "Teren / Live Feed": ext_score,
-                "Status Meča": ext_data["status"]
-            })
-            
-        df = pd.DataFrame(results)
-        
-        if only_mismatches:
-            df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
-            
-        if has_mismatch and sound_alert:
-            st.audio("https://www.soundjay.com/buttons/sounds/beep-07a.mp3", autoplay=True)
-            st.error("🚨 DETEKTOVANO JE NESLAGANJE REZULTATA!")
-            
-        def highlight_status(val):
-            if val == "MISMATCH (NESLAGANJE)":
-                return 'background-color: #d32f2f; color: white; font-weight: bold;'
-            elif val == "NEMA PODATAKA (N/A)":
-                return 'background-color: #4a4a4a; color: #d1d1d1;'
-            elif val == "OK":
-                return 'background-color: #2e7d32; color: white; font-weight: bold;'
-            return ''
-
-        st.subheader(f"📊 Pregled utakmica ({len(df)})")
-        st.dataframe(
-            df.style.map(highlight_status, subset=['Status']), 
-            use_container_width=True
-        )
+        url
