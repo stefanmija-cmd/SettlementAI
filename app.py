@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-PASSWORD = "settlement123"
+PASSWORD = "Delije1989"
 
 def check_password():
     if "authenticated" not in st.session_state:
