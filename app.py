@@ -204,7 +204,7 @@ def fetch_external_live_data(home, away, match_id, live_fixtures, manual_overrid
 # ==========================================
 # 6. INTERFEJS I GLAVNA LOGIKA
 # ==========================================
-st.title("⚽ Settlement Live Checker Pro")
+st.title("⚽ SettlementAI")
 
 st.sidebar.header("⚙️ Podešavanja")
 
