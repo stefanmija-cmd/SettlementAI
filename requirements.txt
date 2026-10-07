@@ -3,3 +3,4 @@ pandas
 requests
 thefuzz
 python-Levenshtein
+git+https://github.com/progeroffline/fs-football.git
