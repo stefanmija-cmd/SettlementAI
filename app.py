@@ -129,12 +129,23 @@ def fetch_external_live_data(home, away, live_fixtures):
     return {"ext_score": "N/A", "status": "N/A"}
 
 # ==========================================
-# 4. KORISNIČKI INTERFEJS I PODEŠAVANJA OSVEŽAVANJA
+# 4. KORISNIČKI INTERFEJS I SAČUVANI SECRETS
 # ==========================================
 st.title("⚽ Settlement Live Checker")
 
 st.sidebar.header("⚙️ Podešavanja")
-api_key_input = st.sidebar.text_input("API-Sports Ključ:", type="password")
+
+# DOHVATANJE KLJUČA IZ ST.SECRETS
+default_key = ""
+if "APISPORTS_KEY" in st.secrets:
+    default_key = st.secrets["APISPORTS_KEY"]
+
+api_key_input = st.sidebar.text_input(
+    "API-Sports Ključ:", 
+    value=default_key, 
+    type="password",
+    help="Ključ je automatski učitan iz Streamlit Secrets podešavanja."
+)
 
 st.sidebar.subheader("🔄 Osvežavanje podataka")
 refresh_mode = st.sidebar.radio(
@@ -158,7 +169,7 @@ only_mismatches = st.sidebar.checkbox("Prikaži samo neslaganja", value=False)
 sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
 
 if not api_key_input:
-    st.info("💡 Unesite API ključ sa `api-sports.io` u sajdbaru.")
+    st.info("💡 Unesite API ključ sa `api-sports.io` u sajdbaru ili ga sačuvajte u Streamlit Secrets.")
 
 if st.sidebar.button("Odjavi se"):
     st.session_state["authenticated"] = False
@@ -166,17 +177,14 @@ if st.sidebar.button("Odjavi se"):
 
 raw_text = st.text_area("Zalepite tabelu iz programa (Ctrl + V):", height=180)
 
-# KONTROLA MANUELNOG ILI AUTOMATSKOG OSVEŽAVANJA
-refresh_clicked = False
+# KONTROLA OSVEŽAVANJA
 if refresh_mode == "Manuelno (Ručno)":
     col1, _ = st.columns([1, 3])
     with col1:
         if st.button("🔄 Osveži live feed", type="primary"):
             st.cache_data.clear()
-            refresh_clicked = True
             st.toast("Podaci osveženi!", icon="🚀")
 else:
-    # Ako je automatsko, obriši keš i sačekaj zadati interval
     st.cache_data.clear()
     time.sleep(0.1)
 
@@ -239,7 +247,7 @@ if raw_text:
             use_container_width=True
         )
 
-# Tajmer za automatsko ponovno pokretanje skripte kada je uključen automatski režim
+# TAJMER ZA AUTOMATSKO OSVEŽAVANJE
 if refresh_mode == "Automatsko":
     time.sleep(auto_interval)
     st.rerun()
