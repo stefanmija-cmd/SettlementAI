@@ -90,58 +90,91 @@ def parse_copied_data(text):
     return matches
 
 # ==========================================
-# 3. SOFASCORE & EXTRA FEED INTEGRACIJA
+# 3. PUBLIC SOFASCORE API INTEGRACIJA
 # ==========================================
+SOFASCORE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.sofascore.com/",
+    "Origin": "https://www.sofascore.com"
+}
+
 def are_teams_matching(home1, away1, home2, away2):
     """Proverava tekstualnu sličnost timova (prag 68%)."""
     sim_home = fuzz.partial_ratio(home1.lower(), home2.lower())
     sim_away = fuzz.partial_ratio(away1.lower(), away2.lower())
     return ((sim_home + sim_away) / 2) > 68
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=20)
 def fetch_sofascore_live_events():
     """
-    Povlači trenutne live utakmice direktno sa SofaScore API-ja.
+    Povlači sve trenutne live utakmice sa Public SofaScore API-ja:
+    GET /api/v1/sport/football/events/live
     """
     url = "https://api.sofascore.com/api/v1/sport/football/events/live"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.sofascore.com/"
-    }
     try:
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=5)
         if res.status_code == 200:
             return res.json().get("events", [])
     except Exception:
         pass
     return []
 
+def search_sofascore_event(home, away):
+    """
+    Kao fallback, koristi Public SofaScore Search API:
+    GET /api/v1/search/all?q={query}
+    """
+    query = f"{home} {away}"
+    url = f"https://api.sofascore.com/api/v1/search/all?q={requests.utils.quote(query)}"
+    try:
+        res = requests.get(url, headers=SOFASCORE_HEADERS, timeout=4)
+        if res.status_code == 200:
+            results = res.json().get("results", [])
+            for item in results:
+                if item.get("type") == "event":
+                    ev = item.get("entity", {})
+                    ss_home = ev.get("homeTeam", {}).get("name", "")
+                    ss_away = ev.get("awayTeam", {}).get("name", "")
+                    if are_teams_matching(home, away, ss_home, ss_away):
+                        home_score = ev.get("homeScore", {}).get("current", 0)
+                        away_score = ev.get("awayScore", {}).get("current", 0)
+                        status_desc = ev.get("status", {}).get("description", "Live")
+                        return {"ext_score": f"{home_score}:{away_score}", "status": f"{status_desc} (SofaSearch)"}
+    except Exception:
+        pass
+    return None
+
 def fetch_external_live_data(match_id, home, away, api_key=None):
     """
-    Pretražuje SofaScore i RapidAPI za live mečeve.
+    Pretražuje mečeve uživo preko Public SofaScore API-ja.
     """
     if not home or not away:
         return {"ext_score": "N/A", "status": "N/A"}
 
-    # 1. Provera preko SofaScore API-ja
-    sofa_events = fetch_sofascore_live_events()
-    for ev in sofa_events:
+    # 1. Provera preko glavne liste utakmica uživo (/sport/football/events/live)
+    live_events = fetch_sofascore_live_events()
+    for ev in live_events:
         ss_home = ev.get("homeTeam", {}).get("name", "")
         ss_away = ev.get("awayTeam", {}).get("name", "")
         
         if are_teams_matching(home, away, ss_home, ss_away):
             home_score = ev.get("homeScore", {}).get("current", 0)
             away_score = ev.get("awayScore", {}).get("current", 0)
-            status_description = ev.get("status", {}).get("description", "Live")
+            status_desc = ev.get("status", {}).get("description", "Live")
             
             return {
                 "ext_score": f"{home_score}:{away_score}",
-                "status": f"{status_description} (SofaScore)"
+                "status": f"{status_desc} (SofaScore Live)"
             }
 
-    # 2. Provera preko RapidAPI ključa (kao rezervna opcija ako je unet)
+    # 2. Fallback: Pretraga meča ako nije pronađen na primarnoj live listi
+    search_res = search_sofascore_event(home, away)
+    if search_res:
+        return search_res
+
+    # 3. Opcioni RapidAPI fallback
     if api_key and len(api_key.strip()) > 5:
         url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
         headers = {
@@ -160,7 +193,7 @@ def fetch_external_live_data(match_id, home, away, api_key=None):
                         gh = fix["goals"]["home"]
                         ga = fix["goals"]["away"]
                         elapsed = fix["fixture"]["status"]["elapsed"]
-                        return {"ext_score": f"{gh}:{ga}", "status": f"{elapsed}' (API-Football)"}
+                        return {"ext_score": f"{gh}:{ga}", "status": f"{elapsed}' (RapidAPI)"}
         except Exception:
             pass
 
@@ -170,31 +203,4 @@ def fetch_external_live_data(match_id, home, away, api_key=None):
 # 4. KORISNIČKI INTERFEJS & PRIKAZ TABELE
 # ==========================================
 st.title("⚽ Settlement Live Checker & Mismatch Detector")
-st.caption("Automatska verifikacija live rezultata sa SofaScore-a i detekcija neslaganja.")
-
-# Sajdbar
-st.sidebar.header("⚙️ Podešavanja")
-api_key_input = st.sidebar.text_input("RapidAPI Ključ (Opciono):", type="password")
-only_mismatches = st.sidebar.checkbox("Prikaži samo neslaganja", value=False)
-sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
-
-if st.sidebar.button("Odjavi se"):
-    st.session_state["authenticated"] = False
-    st.rerun()
-
-# Unos teksta
-raw_text = st.text_area("Zalepite tabelu kopiranu iz vašeg programa (Ctrl + V):", height=180)
-
-if raw_text:
-    parsed_matches = parse_copied_data(raw_text)
-    
-    if not parsed_matches:
-        st.warning("⚠️ Nije prepoznata struktura teksta. Proverite da li ste dobro kopirali tabelu.")
-    else:
-        results = []
-        has_mismatch = False
-        
-        for m in parsed_matches:
-            ext_data = fetch_external_live_data(m["ID"], m["Home"], m["Away"], api_key_input)
-            ext_score = ext_data["ext_score"]
-            my_score = m["Moj Sistem Rezultat"]
+st.caption("Automatska verifikacija live rezultata sa Public SofaScore API-ja i det
