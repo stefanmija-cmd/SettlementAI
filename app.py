@@ -39,40 +39,66 @@ if not check_password():
 # 2. PARSER KOPIRANOG TEKSTA
 # ==========================================
 def parse_copied_data(text):
+    """
+    Prilagođeni parser koji uzima u obzir da su 'Home' i 'Away' trenutni golovi (cifre),
+    a 'Score2' rezultat poluvremena (X:Y) koji se pojavljuje tek nakon 1. poluvremena.
+    """
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     matches = []
     
     for idx, line in enumerate(lines):
+        # Tražimo ID meča (4 do 6 cifara)
         if re.match(r'^\d{4,6}$', line):
             try:
                 match_id = line
                 league = lines[idx - 1] if idx - 1 >= 0 else "Nepoznata liga"
-                home = lines[idx + 1] if idx + 1 < len(lines) else ""
-                away = lines[idx + 2] if idx + 2 < len(lines) else ""
                 
-                my_score = "N/A"
-                for j in range(idx, min(idx + 15, len(lines))):
-                    if re.match(r'^\d+:\d+$', lines[j]):
-                        my_score = lines[j]
-                        break
+                # Skupljamo narednih 15-ak redova unutar ovog meča
+                block = lines[idx+1 : min(idx + 18, len(lines))]
                 
-                if my_score == "N/A":
-                    for j in range(idx + 3, min(idx + 12, len(lines) - 1)):
-                        if lines[j].isdigit() and lines[j+1].isdigit():
-                            if len(lines[j]) <= 2 and len(lines[j+1]) <= 2:
-                                my_score = f"{lines[j]}:{lines[j+1]}"
-                                break
+                # 1. Traženje naziva timova i trenutnog rezultata
+                # Pronalaženje svih pojedinačnih brojeva (golova) u bloku
+                scores_found = []
+                half_time_score = "N/A"
+                team_names = []
                 
-                block_lines = lines[idx:min(idx + 18, len(lines))]
-                auto_check = "A" if "A" in block_lines else ("M" if "M" in block_lines else "M")
+                for item in block:
+                    # Ako naiđemo na format X:Y (to je Score2 / poluvrijeme)
+                    if re.match(r'^\d+:\d+$', item):
+                        half_time_score = item
+                        continue
+                        
+                    # Ako je samo cifra (trenutni golovi Home / Away)
+                    if item.isdigit() and len(item) <= 2:
+                        scores_found.append(item)
+                        continue
+                        
+                    # Ako nije ID, nije oznaka A/M, nije liga i nije status -> to je ime tima
+                    if not item.isdigit() and item not in ["A", "M"] and ":" not in item:
+                        if len(item) > 1 and item != league:
+                            team_names.append(item)
+
+                # Formiranje trenutnog rezultata iz Home i Away golova
+                if len(scores_found) >= 2:
+                    my_score = f"{scores_found[0]}:{scores_found[1]}"
+                else:
+                    my_score = "N/A"
+                    
+                # Formiranje imena timova
+                home_team = team_names[0] if len(team_names) > 0 else "Domaćin"
+                away_team = team_names[1] if len(team_names) > 1 else "Gost"
+                
+                # Oznaka A ili M
+                auto_check = "A" if "A" in block else ("M" if "M" in block else "M")
                 
                 matches.append({
                     "ID": match_id,
                     "Liga": league,
-                    "Home": home,
-                    "Away": away,
-                    "Meč": f"{home} - {away}",
+                    "Home": home_team,
+                    "Away": away_team,
+                    "Meč": f"{home_team} - {away_team}",
                     "Moj Sistem Rezultat": my_score,
+                    "Poluvreme (Score2)": half_time_score,
                     "Oznaka": auto_check
                 })
             except Exception:
