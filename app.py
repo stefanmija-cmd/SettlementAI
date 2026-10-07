@@ -41,27 +41,54 @@ if not check_password():
 # ==========================================
 def parse_copied_data(text):
     """
-    Fleksibilni parser koji pronalazi utakmice na osnovu ID broja meča.
+    Parser prilagođen strukturi tabele iz radnog programa.
     """
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     matches = []
     
     for idx, line in enumerate(lines):
-        # Traži ID utakmice (broj od 4 do 6 cifara)
+        # Tražimo ID meča (4 do 6 cifara)
         if re.match(r'^\d{4,6}$', line):
             try:
                 match_id = line
                 league = lines[idx - 1] if idx - 1 >= 0 else "Nepoznata liga"
+                home = lines[idx + 1] if idx + 1 < len(lines) else ""
+                away = lines[idx + 2] if idx + 2 < len(lines) else ""
                 
-                home = lines[idx + 1] if idx + 1 < len(lines) else "Domaćin"
-                away = lines[idx + 2] if idx + 2 < len(lines) else "Gost"
-                
-                # Pretraga rezultata u narednim linijama (format npr. 2:2, 0:0)
-                score = "N/A"
-                for j in range(idx, min(idx + 12, len(lines))):
+                # Traženje rezultata u tvojoj tabeli:
+                # 1. Prvo tražimo format X:Y (npr. 1:0)
+                my_score = "N/A"
+                for j in range(idx, min(idx + 15, len(lines))):
                     if re.match(r'^\d+:\d+$', lines[j]):
-                        score = lines[j]
+                        my_score = lines[j]
                         break
+                
+                # 2. Ako nema format X:Y, tražimo dva uzastopna broja (Home i Away golovi)
+                if my_score == "N/A":
+                    for j in range(idx + 3, min(idx + 12, len(lines) - 1)):
+                        if lines[j].isdigit() and lines[j+1].isdigit():
+                            # Izbegavamo min/vreme i uzimamo rezultat
+                            if len(lines[j]) <= 2 and len(lines[j+1]) <= 2:
+                                my_score = f"{lines[j]}:{lines[j+1]}"
+                                break
+                
+                # Oznaka A ili M
+                block_lines = lines[idx:min(idx + 18, len(lines))]
+                auto_check = "A" if "A" in block_lines else ("M" if "M" in block_lines else "M")
+                
+                matches.append({
+                    "ID": match_id,
+                    "Liga": league,
+                    "Home": home,
+                    "Away": away,
+                    "Meč": f"{home} - {away}",
+                    "Moj Sistem Rezultat": my_score,
+                    "Oznaka": auto_check
+                })
+            except Exception:
+                continue
+                
+    return matches
                 
                 # Pretraga oznake A ili M
                 block_lines = lines[idx:min(idx + 15, len(lines))]
