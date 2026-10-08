@@ -296,7 +296,17 @@ if "session_mismatches" not in st.session_state:
     st.session_state["session_mismatches"] = []
 
 # UNOS TEKSTA
-raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160, key="raw_text_input")
+# Funkcija za potpuno čišćenje i polja i izveštaja
+def clear_text_callback():
+    st.session_state["raw_text_input"] = ""
+    st.session_state["process_triggered"] = False
+
+# UNOS TEKSTA (vezan na session_state)
+raw_text = st.text_area(
+    "Zalepite tabelu iz vašeg programa (Ctrl + V):", 
+    height=160, 
+    key="raw_text_input"
+)
 
 col_btn1, col_btn2, _ = st.columns([2, 1, 3])
 
@@ -306,14 +316,11 @@ with col_btn1:
         st.cache_data.clear()
 
 with col_btn2:
-    if st.button("🗑️ Očisti tekst", use_container_width=True):
-        st.session_state["process_triggered"] = False
-        st.rerun()
-
-if refresh_mode == "Automatsko":
-    st.session_state["process_triggered"] = True
-    st.cache_data.clear()
-    time.sleep(0.1)
+    st.button(
+        "🗑️ Očisti tekst", 
+        on_click=clear_text_callback, 
+        use_container_width=True
+    )
 
 # OBRADA PODATAKA
 if raw_text and st.session_state["process_triggered"]:
