@@ -39,9 +39,9 @@ if not check_password():
 # 2. AUDIO ALARM SA IZBOROM ZVUKA
 # ==========================================
 SOUND_URLS = {
-    "Standardni Beep": "https://media.geeksforgeeks.org/wp-content/uploads/20190531135120/beep.mp3",
-    "Kratki Ping": "https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3",
-    "Upozorenje / Sirena": "https://assets.mixkit.co/active_storage/sfx/995/995-preview.mp3"
+    "Beep": "https://media.geeksforgeeks.org/wp-content/uploads/20190531135120/beep.mp3",
+    "Ping": "https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3",
+    "Upozorenje": "https://assets.mixkit.co/active_storage/sfx/995/995-preview.mp3"
 }
 
 def play_sound_alarm(sound_choice):
