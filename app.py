@@ -4,6 +4,8 @@ Potrebno: streamlit>=1.40, pandas, requests, rapidfuzz  (vidi requirements.txt)
 Secrets (.streamlit/secrets.toml):
     APP_PASSWORD = "nova-jaka-lozinka"
     APISPORTS_KEY = "tvoj-api-kljuc"        # opciono
+    FOOTBALLDATA_KEY = "tvoj-fd-kljuc"     # opciono (football-data.org)
+    DEFAULT_PROVIDER = "football-data.org"  # opciono
 """
 import hmac
 import io
@@ -15,7 +17,7 @@ import struct
 import time
 import unicodedata
 import wave
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -31,6 +33,16 @@ st.set_page_config(page_title="SettlementCheck", page_icon=":material/fact_check
 STATE_FILE = os.environ.get("SETTLEMENT_STATE_FILE", "settlement_state.json")
 API_URL = "https://v3.football.api-sports.io/fixtures"
 TZ = ZoneInfo("Europe/Belgrade")
+PROVIDERS = ["API-Sports", "football-data.org"]
+FD_URL = "https://api.football-data.org/v4/matches"
+FD_STATUS = {"IN_PLAY": "LIVE", "LIVE": "LIVE", "PAUSED": "HT", "FINISHED": "FT", "AWARDED": "FT",
+             "SUSPENDED": "SUSP", "INTERRUPTED": "SUSP", "POSTPONED": "PST", "CANCELLED": "CANC",
+             "CANCELED": "CANC"}  # SCHEDULED/TIMED -> "NS" (preskače se)
+
+
+def ov_key(provider, mid):
+    """Ručna spajanja su vezana za provajdera (ID-jevi utakmica se razlikuju). API-Sports ostaje bez prefiksa."""
+    return mid if provider == "API-Sports" else f"{provider}|{mid}"
 FINISHED = {"FT", "AET", "PEN"}
 SKIP_STATUSES = {"NS", "TBD", "PST", "CANC"}
 QUALIFIERS = {"u17", "u18", "u19", "u20", "u21", "u23", "w", "women", "ii", "b", "reserves"}
@@ -267,7 +279,8 @@ def find_candidate(m, index):
 def apply_override(m, fx):
     """Trajno spaja meč sa fixture ID-om i uči sinonime."""
     store = st.session_state["store"]
-    store["overrides"][m["ID"]] = {"fixture_id": fx["id"], "label": f"{fx['home']} - {fx['away']}"}
+    store["overrides"][ov_key(st.session_state.get("provider", "API-Sports"), m["ID"])] = {
+        "fixture_id": fx["id"], "label": f"{fx['home']} - {fx['away']}"}
     for mine, theirs in ((m["Home"], fx["home"]), (m["Away"], fx["away"])):
         a, b = clean_name(mine), clean_name(theirs)
         if a and b and a != b and mine not in ("Domaćin", "Gost"):
@@ -329,28 +342,63 @@ def _request(api_key, params):
             r.headers.get("x-ratelimit-requests-limit", "N/A"), time.time())
 
 
+def fd_to_fixture(m):
+    """Prevodi utakmicu iz football-data.org u format koji ostatak aplikacije već koristi."""
+    sc = m.get("score") or {}
+    ft, reg, ex = sc.get("fullTime") or {}, sc.get("regularTime") or {}, sc.get("extraTime") or {}
+    duration = sc.get("duration")
+    short = FD_STATUS.get(m.get("status"), "NS")
+    if short == "FT" and duration == "EXTRA_TIME":
+        short = "AET"
+    elif short == "FT" and duration == "PENALTY_SHOOTOUT":
+        short = "PEN"
+    gh, ga = ft.get("home"), ft.get("away")
+    if duration in ("EXTRA_TIME", "PENALTY_SHOOTOUT") and reg.get("home") is not None:
+        # rezultat bez raspucavanja penala: redovno vreme + produžeci
+        gh, ga = reg["home"] + (ex.get("home") or 0), reg["away"] + (ex.get("away") or 0)
+    return {
+        "fixture": {"id": m.get("id"), "status": {"short": short, "elapsed": m.get("minute")}},
+        "league": {"name": g(m, "competition", "name", default="")},
+        "teams": {"home": {"name": g(m, "homeTeam", "name", default="")},
+                  "away": {"name": g(m, "awayTeam", "name", default="")}},
+        "goals": {"home": gh, "away": ga},
+        "score": {"fulltime": {"home": reg.get("home", gh), "away": reg.get("away", ga)}},
+    }
+
+
+def _request_fd(api_key, params):
+    r = requests.get(FD_URL, headers={"X-Auth-Token": api_key}, params=params, timeout=8)
+    r.raise_for_status()
+    matches = [fd_to_fixture(m) for m in r.json().get("matches", [])]
+    return matches, r.headers.get("X-Requests-Available-Minute", "N/A"), "N/A", time.time()
+
+
 # Izuzeci se ne keširaju. 'nonce' forsira svež poziv samo za ovu sesiju.
 @st.cache_data(ttl=15, show_spinner=False)
-def _fetch_live(api_key, nonce):
+def _fetch_live(provider, api_key, nonce):
+    if provider == "football-data.org":
+        return _request_fd(api_key, {"status": "LIVE"})
     return _request(api_key, {"live": "all"})
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _fetch_date(api_key, day, nonce):
+def _fetch_date(provider, api_key, day, nonce):
+    if provider == "football-data.org":  # UTC datum: uzimamo i sledeći dan da se ne izgube kasni mečevi
+        return _request_fd(api_key, {"dateFrom": day, "dateTo": (date.fromisoformat(day) + timedelta(days=1)).isoformat()})
     return _request(api_key, {"date": day, "timezone": "Europe/Belgrade"})
 
 
-def load_fixtures(api_key, include_finished, day, nonce, reuse=False):
+def load_fixtures(provider, api_key, include_finished, day, nonce, reuse=False):
     """Vraća (fixtures, remaining, limit, fetched_at, errors). U manuelnom režimu (reuse=True)
     ponovo se koristi poslednji uspešan odgovor dok se ne klikne 'Učitaj i proveri'."""
-    key = (hash(api_key), include_finished, day, nonce)
+    key = (provider, hash(api_key), include_finished, day, nonce)
     saved = st.session_state.get("feed_cache")
     if reuse and saved and saved["key"] == key:
         return saved["value"]
     merged, remaining, limit, errors, stamps, live_ts = {}, "N/A", "N/A", [], [], None
-    calls = [("live", lambda: _fetch_live(api_key, nonce))]
+    calls = [("live", lambda: _fetch_live(provider, api_key, nonce))]
     if include_finished:  # prvo datum, pa live da live pregazi iste mečeve
-        calls.insert(0, ("datum", lambda: _fetch_date(api_key, day, nonce)))
+        calls.insert(0, ("datum", lambda: _fetch_date(provider, api_key, day, nonce)))
     for name, fn in calls:
         try:
             data, remaining, limit, ts = fn()
@@ -361,7 +409,9 @@ def load_fixtures(api_key, include_finished, day, nonce, reuse=False):
                 merged[g(fx, "fixture", "id")] = fx
         except requests.HTTPError as e:
             code = e.response.status_code if e.response is not None else "?"
-            errors.append("Prekoračen dnevni limit API zahteva!" if code == 429 else f"{name}: HTTP {code}")
+            errors.append("Prekoračen limit API zahteva (sačekajte ili proverite plan)." if code == 429 else
+                          "Ključ nije prihvaćen ili plan ne pokriva zahtev (HTTP %s)." % code if code in (401, 403)
+                          else f"{name}: HTTP {code}")
         except Exception as e:
             errors.append(f"{name}: {e}")
     result = (list(merged.values()), remaining, limit, live_ts or (min(stamps) if stamps else None), errors)
@@ -547,8 +597,19 @@ def build_excel(df_full, inc_store, meta):
 app_header()
 st.sidebar.header("Podešavanja")
 
-api_key_input = st.sidebar.text_input("API-Sports ključ (opciono, zamenjuje secrets):", type="password")
-api_key = (api_key_input or str(get_secret("APISPORTS_KEY"))).strip()
+provider = st.sidebar.selectbox("Provajder podataka:", PROVIDERS, key="provider",
+                                index=1 if get_secret("DEFAULT_PROVIDER") == "football-data.org" else 0)
+if st.session_state.get("last_provider") != provider:  # brojač i keš pripadaju provajderu
+    for _k in ("api_remaining", "api_limit", "feed_cache"):
+        st.session_state.pop(_k, None)
+    st.session_state["last_provider"] = provider
+secret_name = "FOOTBALLDATA_KEY" if provider == "football-data.org" else "APISPORTS_KEY"
+api_key_input = st.sidebar.text_input(f"{provider} ključ (opciono, zamenjuje secrets):", type="password",
+                                      key=f"key_{provider}")
+api_key = (api_key_input or str(get_secret(secret_name))).strip()
+if provider == "football-data.org":
+    st.sidebar.caption("Besplatan plan: 10 zahteva u minuti i ograničen broj takmičenja. "
+                       "Proverite i da li su rezultati uživo odloženi.")
 
 st.sidebar.subheader("Izvor podataka")
 include_finished = st.sidebar.checkbox("Uključi i završene mečeve (po datumu)", value=True)
@@ -565,7 +626,8 @@ refresh_mode = st.sidebar.radio("Režim:", ["Manuelno (Ručno)", "Automatsko"], 
 auto_interval = 60
 if refresh_mode == "Automatsko":
     auto_interval = st.sidebar.slider("Interval (sekunde):", 15, 300, 60, 15)
-    st.sidebar.warning("Troši do 2 API zahteva po ciklusu.")
+    st.sidebar.warning("Troši do 2 API zahteva po ciklusu." + (" Za football-data.org koristite interval od 30 s ili više."
+                                                      if provider == "football-data.org" else ""))
 
 st.sidebar.subheader("Zvučna upozorenja")
 sound_alert = st.sidebar.checkbox("Zvučni alarm za nova neslaganja", value=True)
@@ -609,7 +671,7 @@ col2.button("Očisti", icon=":material/delete:", on_click=clear_text_callback, u
 # ==========================================
 # 10. REZULTATI (fragment: osvežava se sam, UI ostaje živ)
 # ==========================================
-cfg = dict(api_key=api_key, include_finished=include_finished, day=day, use_90=use_90,
+cfg = dict(provider=provider, api_key=api_key, include_finished=include_finished, day=day, use_90=use_90,
            threshold=threshold, grace=grace, compact=compact, auto=(refresh_mode == "Automatsko"), interval=auto_interval, sound_alert=sound_alert, sound_choice=sound_choice)
 run_every = auto_interval if (refresh_mode == "Automatsko" and st.session_state["process_triggered"]) else None
 
@@ -629,7 +691,7 @@ def results_view(text, cfg):
             fixtures, remaining, limit, fetched_at, errors = [], "N/A", "N/A", None, []
             if cfg["api_key"]:
                 fixtures, remaining, limit, fetched_at, errors = load_fixtures(
-                    cfg["api_key"], cfg["include_finished"], cfg["day"], st.session_state["refresh_nonce"],
+                    cfg["provider"], cfg["api_key"], cfg["include_finished"], cfg["day"], st.session_state["refresh_nonce"],
                     reuse=not cfg["auto"])
             else:
                 st.warning("Nedostaje API ključ (secrets ili polje u sidebar-u).")
@@ -637,8 +699,9 @@ def results_view(text, cfg):
                 st.error(f"{e}")
             if remaining != "N/A":
                 st.session_state["api_remaining"], st.session_state["api_limit"] = remaining, limit
-                if str(remaining).isdigit() and int(remaining) < 100:
-                    st.warning(f"Ostalo je samo {remaining} API zahteva za danas!")
+                per_min = cfg["provider"] == "football-data.org"
+                if str(remaining).isdigit() and int(remaining) < (3 if per_min else 100):
+                    st.warning(f"Ostalo je samo {remaining} API zahteva " + ("u ovom minutu!" if per_min else "za danas!"))
 
             index = build_index(fixtures, cfg["use_90"])
             by_id = {fx["id"]: fx for fx in index}
@@ -649,7 +712,7 @@ def results_view(text, cfg):
 
             for m in parsed:
                 mid, my = m["ID"], m["Moj Sistem Rezultat"]
-                ov = overrides.get(mid)
+                ov = overrides.get(ov_key(cfg["provider"], mid))
                 note, conf, fx = "", 0, None
                 if ov:
                     fx, conf, note = by_id.get(ov["fixture_id"]), 100, "ručno"
@@ -760,7 +823,8 @@ def results_view(text, cfg):
             m3.metric("Neslaganja", counts["mismatch"], delta_color="inverse")
             m4.metric("Čeka potvrdu", counts["wait"])
             m5.metric("Nema podataka", counts["na"])
-            m6.metric("API zahteva preostalo", st.session_state.get("api_remaining", "N/A"))
+            m6.metric("API zahteva preostalo" + (" (min.)" if cfg["provider"] == "football-data.org" else ""),
+                      st.session_state.get("api_remaining", "N/A"))
 
             rem, lim = st.session_state.get("api_remaining"), st.session_state.get("api_limit")
             if str(rem).isdigit() and str(lim).isdigit() and int(lim) > 0:
@@ -778,71 +842,4 @@ def results_view(text, cfg):
             groups = [
                 ("Neslaganja", dq[dq["Status"] == "Neslaganje"]),
                 ("Čeka potvrdu", dq[dq["Status"] == "Čeka potvrdu"]),
-                ("N/A", dq[dq["Status"].isin(["Nema podataka", "Sistem bez rezultata"])]),
-                ("Sve", dq),
-            ]
-            for tab, (name, d) in zip(st.tabs([f"{n} ({len(d)})" for n, d in groups]), groups):
-                with tab:
-                    render_table(d)
-
-            if not compact:
-                # --- Ručno spajanje + predlozi ---
-                with st.expander(f"Ručno spajanje ({len(overrides)} sačuvanih)"):
-                    if index:
-                        mby = {m["ID"]: m for m in parsed}
-                        sel_m = st.selectbox("Meč iz tvog sistema:", [m["ID"] for m in parsed],
-                                             format_func=lambda i: f"{i} – {mby[i]['Meč']}", key="ov_match")
-                        sel_f = st.selectbox("Utakmica na API-ju:", [f["id"] for f in index],
-                                             format_func=lambda i: f"{by_id[i]['home']} - {by_id[i]['away']} "
-                                                                   f"({by_id[i]['liga']}, {by_id[i]['status']})",
-                                             key="ov_fix")
-                        st.button("Sačuvaj spajanje", on_click=lambda: apply_override(mby[sel_m], by_id[sel_f]))
-                    else:
-                        st.info("Nema učitanih utakmica sa API-ja.")
-                    if overrides:
-                        st.button("Obriši sva ručna spajanja", on_click=clear_overrides)
-
-                if suggestions:
-                    with st.expander("Predlozi za spajanje (jedan klik)", expanded=True):
-                        for m, cand in suggestions:
-                            c1, c2, c3 = st.columns([2, 3, 2])
-                            c1.write(f"**ID {m['ID']}**: {m['Meč']}")
-                            c2.write(f"API kandidat: **{cand['home']} - {cand['away']}** ({cand['status']})")
-                            c3.button("Spoji", key=f"sug_{m['ID']}", on_click=apply_override, args=(m, cand))
-
-            meta = [
-                ("Generisano", datetime.now(TZ).strftime("%d.%m.%Y %H:%M:%S")),
-                ("Operater", st.session_state.get("operator", "").strip() or "—"),
-                ("Podaci iz feeda", fmt_time(fetched_at) if fetched_at else "—"),
-                ("Izvor", f"uživo + završeni ({cfg['day']})" if cfg["include_finished"] else "samo uživo"),
-                ("API zahteva preostalo", st.session_state.get("api_remaining", "N/A")),
-                ("Ukupno mečeva", len(df_full)), ("Neslaganja", counts["mismatch"]),
-                ("Čeka potvrdu", counts["wait"]), ("Bez podataka", counts["na"]),
-                ("Upozorenje feeda", feed_problem or "nema"),
-            ]
-            d1, d2, _ = st.columns([2, 2, 3])
-            d1.download_button("Preuzmi Excel izveštaj", build_excel(df_full, inc_store, meta),
-                               file_name=f"settlementcheck_{datetime.now(TZ).strftime('%Y%m%d_%H%M')}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               icon=":material/download:")
-            d2.download_button("Preuzmi CSV", df_full.to_csv(index=False).encode("utf-8"),
-                               file_name="settlementcheck_report.csv", mime="text/csv")
-
-    # --- Arhiva incidenata (prikazuje se i bez učitane tabele) ---
-    if inc_store and not compact:
-        st.markdown("---")
-        st.subheader("Arhiva neslaganja")
-        st.caption("Pamti se i posle osvežavanja stranice (settlement_state.json).")
-        arch = incidents_frame(inc_store, time.time())
-        st.dataframe(arch.iloc[::-1], use_container_width=True, hide_index=True)
-        st.button("Obriši rešena neslaganja", on_click=clear_resolved)
-
-    # --- Live monitor ---
-    if index and not compact:
-        with st.expander("Sve utakmice trenutno dostupne sa API-ja"):
-            st.dataframe(pd.DataFrame([{"Liga": f["liga"], "Domaćin": f["home"], "Gost": f["away"],
-                                        "Rezultat": f["score"], "Status": f["status"]} for f in index]),
-                         use_container_width=True, hide_index=True)
-
-
-results_view(raw_text, cfg)
+                ("N/A", dq[dq["Status"].isin(["Nema podataka", "Sistem bez rezu
