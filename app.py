@@ -1,10 +1,3 @@
-"""SettlementCheck
-
-Potrebno: streamlit>=1.37, pandas, requests, rapidfuzz  (vidi requirements.txt)
-Secrets (.streamlit/secrets.toml):
-    APP_PASSWORD = "nova-jaka-lozinka"
-    APISPORTS_KEY = "tvoj-api-kljuc"        # opciono
-"""
 import hmac
 import io
 import json
@@ -395,6 +388,11 @@ day = st.sidebar.date_input("Datum:", value=date.today()).isoformat() if include
 use_90 = st.sidebar.checkbox("Za AET/PEN koristi rezultat posle 90 min", value=False)
 threshold = st.sidebar.slider("Prag poklapanja imena timova:", 70, 95, 80, 5)
 
+st.sidebar.subheader("👤 Operater")
+st.sidebar.text_input("Ime", key="operator")
+if not st.session_state.get("operator", "").strip():
+    st.sidebar.caption("⚠️")
+
 st.sidebar.subheader("⏱️ Tolerancija kašnjenja")
 grace = st.sidebar.slider("Neslaganje je alarm tek posle (s):", 0, 300, 60, 15,
                           help="Završeni mečevi (FT/AET/PEN) se ne odlažu.")
@@ -414,11 +412,6 @@ if st.sidebar.button("▶️ Probaj zvuk"):
 
 st.sidebar.subheader("🖥️ Prikaz")
 compact = st.sidebar.checkbox("Kompaktni režim (samo baner, brojači i tabele)", value=False)
-
-st.sidebar.subheader("👤 Operater")
-st.sidebar.text_input("Ime (upisuje se uz svako novo neslaganje):", key="operator")
-if not st.session_state.get("operator", "").strip():
-    st.sidebar.caption("⚠️ Upišite ime da bi se vezalo za neslaganja.")
 
 if st.sidebar.button("Odjavi se"):
     st.session_state["authenticated"] = False
