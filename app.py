@@ -9,7 +9,7 @@ from thefuzz import fuzz
 # 1. PODEŠAVANJE STRANICE I AUTORIZACIJA
 # ==========================================
 st.set_page_config(
-    page_title="SettlementAI", 
+    page_title="Settlement Live Checker Pro", 
     page_icon="⚽", 
     layout="wide"
 )
@@ -36,12 +36,19 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 2. AUDIO ALARM
+# 2. AUDIO ALARM SA IZBOROM ZVUKA
 # ==========================================
-def play_sound_alarm():
-    audio_html = """
+SOUND_URLS = {
+    "Standardni Beep": "https://media.geeksforgeeks.org/wp-content/uploads/20190531135120/beep.mp3",
+    "Kratki Ping": "https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3",
+    "Upozorenje / Sirena": "https://assets.mixkit.co/active_storage/sfx/995/995-preview.mp3"
+}
+
+def play_sound_alarm(sound_choice):
+    url = SOUND_URLS.get(sound_choice, SOUND_URLS["Standardni Beep"])
+    audio_html = f"""
         <audio autoplay style="display:none;">
-            <source src="https://media.geeksforgeeks.org/wp-content/uploads/20190531135120/beep.mp3" type="audio/mpeg">
+            <source src="{url}" type="audio/mpeg">
         </audio>
     """
     st.markdown(audio_html, unsafe_allow_html=True)
@@ -66,6 +73,10 @@ def normalize_team_name(name):
     return TEAM_ALIASES.get(name, name)
 
 def are_teams_matching(home1, away1, home2, away2):
+    """
+    Stroga provera: Domaćin sa Domaćinom i Gost sa Gostom (min 75% podudaranja).
+    Obrnuta domaćinstva se NAMERNO ne prepoznaju jer predstavljaju nevažeće klađenje.
+    """
     h1 = normalize_team_name(home1)
     a1 = normalize_team_name(away1)
     h2 = normalize_team_name(home2)
@@ -75,6 +86,31 @@ def are_teams_matching(home1, away1, home2, away2):
     sim_away = fuzz.partial_ratio(a1, a2)
     
     return sim_home >= 75 and sim_away >= 75
+
+# Funkcija za predlaganje parova iz API-ja za N/A utakmice
+def find_best_candidate(home, away, live_fixtures):
+    h = normalize_team_name(home)
+    a = normalize_team_name(away)
+    
+    best_candidate = None
+    best_score = 0
+    
+    for fix in live_fixtures:
+        ext_home = fix.get("teams", {}).get("home", {}).get("name", "")
+        ext_away = fix.get("teams", {}).get("away", {}).get("name", "")
+        
+        eh = normalize_team_name(ext_home)
+        ea = normalize_team_name(ext_away)
+        
+        score_h = fuzz.partial_ratio(h, eh)
+        score_a = fuzz.partial_ratio(a, ea)
+        avg_score = (score_h + score_a) / 2
+        
+        if avg_score > 50 and avg_score > best_score:
+            best_score = avg_score
+            best_candidate = f"{ext_home} - {ext_away}"
+            
+    return best_candidate
 
 # ==========================================
 # 4. PARSER KOPIRANOG TEKSTA
@@ -196,7 +232,7 @@ def fetch_external_live_data(home, away, match_id, live_fixtures, manual_overrid
 # ==========================================
 # 6. INTERFEJS I LOGIKA
 # ==========================================
-st.title("⚽ SettlementAI")
+st.title("⚽ Settlement Live Checker Pro")
 
 st.sidebar.header("⚙️ Podešavanja")
 
@@ -222,7 +258,9 @@ if refresh_mode == "Automatsko":
     auto_interval = st.sidebar.slider("Interval (sekunde):", 15, 300, 60, 15)
     st.sidebar.warning(f"⚠️ Troši 1 API zahtev svakih {auto_interval}s.")
 
+st.sidebar.subheader("🔊 Zvučna Upozorenja")
 sound_alert = st.sidebar.checkbox("Omogući zvučni alarm", value=True)
+sound_choice = st.sidebar.selectbox("Vrsta zvuka:", list(SOUND_URLS.keys()))
 
 # MANUAL OVERRIDE
 st.sidebar.markdown("---")
@@ -250,150 +288,5 @@ if st.sidebar.button("Odjavi se"):
     st.session_state["authenticated"] = False
     st.rerun()
 
-# INICIJALIZACIJA STANJA ZA OBRADU
-if "process_triggered" not in st.session_state:
-    st.session_state["process_triggered"] = False
-
-# UNOS TEKSTA
-raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160, key="raw_text_input")
-
-# DUGMAD ZA KONTROLU
-col_btn1, col_btn2, _ = st.columns([2, 1, 3])
-
-with col_btn1:
-    # VELIKO DUGME ZA POkRETANJE PROVERE
-    if st.button("🚀 Učitaj i proveri tabelu", type="primary", use_container_width=True):
-        st.session_state["process_triggered"] = True
-        st.cache_data.clear()
-
-with col_btn2:
-    if st.button("🗑️ Očisti tekst", use_container_width=True):
-        st.session_state["process_triggered"] = False
-        st.rerun()
-
-if refresh_mode == "Automatsko":
-    st.session_state["process_triggered"] = True
-    st.cache_data.clear()
-    time.sleep(0.1)
-
-# OBRADA PODATAKA
-if raw_text and st.session_state["process_triggered"]:
-    parsed_matches = parse_copied_data(raw_text)
-    
-    if not parsed_matches:
-        st.warning("⚠️ Nije prepoznata struktura teksta. Proverite uslov kopiranja.")
-    else:
-        live_games, remaining_reqs = fetch_all_live_fixtures(api_key_input) if api_key_input else ([], "N/A")
-        
-        if remaining_reqs != "N/A":
-            st.sidebar.info(f"📊 Preostalo API zahteva: **{remaining_reqs}**")
-        
-        results = []
-        has_mismatch = False
-        count_ok, count_mismatch, count_na = 0, 0, 0
-        
-        for m in parsed_matches:
-            ext_data = fetch_external_live_data(
-                m["Home"], 
-                m["Away"], 
-                m["ID"], 
-                live_games, 
-                st.session_state["manual_overrides"]
-            )
-            
-            ext_score = ext_data["ext_score"]
-            my_score = m["Moj Sistem Rezultat"]
-            
-            if ext_score == "N/A":
-                status_check = "NEMA PODATAKA (N/A)"
-                count_na += 1
-            elif my_score != ext_score:
-                status_check = "MISMATCH (NESLAGANJE)"
-                has_mismatch = True
-                count_mismatch += 1
-            else:
-                status_check = "OK"
-                count_ok += 1
-            
-            results.append({
-                "Status": status_check,
-                "ID": m["ID"],
-                "Oznaka": m["Oznaka"],
-                "Liga": m["Liga"],
-                "Meč": m["Meč"],
-                "Tvoj Sistem": my_score,
-                "Score2 (HT)": m["Score2 (HT)"],
-                "Teren / Live Feed": ext_score,
-                "Status Meča": ext_data["status"]
-            })
-            
-        df = pd.DataFrame(results)
-        
-        # METRIKE NA VRHU
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Ukupno mečeva", len(df))
-        m2.metric("Usklađeno (OK)", count_ok)
-        m3.metric("Neslaganja (MISMATCH)", count_mismatch, delta_color="inverse")
-        m4.metric("Nema podataka (N/A)", count_na)
-        
-        # BRZI FILTERI
-        filter_status = st.radio(
-            "Filtriraj prikaz:", 
-            ["Svi mečevi", "Samo Neslaganja (MISMATCH)", "Samo Nema Podataka (N/A)"], 
-            horizontal=True
-        )
-        
-        if filter_status == "Samo Neslaganja (MISMATCH)":
-            df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
-        elif filter_status == "Samo Nema Podataka (N/A)":
-            df = df[df["Status"] == "NEMA PODATAKA (N/A)"]
-            
-        if has_mismatch and sound_alert:
-            play_sound_alarm()
-            st.error("🚨 DETEKTOVANO JE NESLAGANJE REZULTATA!")
-            
-        def highlight_status(val):
-            if val == "MISMATCH (NESLAGANJE)":
-                return 'background-color: #d32f2f; color: white; font-weight: bold;'
-            elif val == "NEMA PODATAKA (N/A)":
-                return 'background-color: #4a4a4a; color: #d1d1d1;'
-            elif val == "OK":
-                return 'background-color: #2e7d32; color: white; font-weight: bold;'
-            return ''
-
-        st.subheader("📊 Pregled utakmica")
-        st.dataframe(
-            df.style.map(highlight_status, subset=['Status']), 
-            use_container_width=True
-        )
-
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Preuzmi izveštaj (CSV)",
-            data=csv,
-            file_name="settlement_mismatch_report.csv",
-            mime="text/csv"
-        )
-
-        # LIVE MONITOR - PRIKAZ SVIH API LIVE UTKMICA
-        with st.expander("📺 Pregled svih trenutno aktivnih live utakmica na API-ju"):
-            if live_games:
-                live_list = []
-                for lg in live_games:
-                    live_list.append({
-                        "Liga": lg.get("league", {}).get("name", ""),
-                        "Domaćin": lg.get("teams", {}).get("home", {}).get("name", ""),
-                        "Gost": lg.get("teams", {}).get("away", {}).get("name", ""),
-                        "Rezultat": f"{lg.get('goals',{}).get('home',0)}:{lg.get('goals',{}).get('away',0)}",
-                        "Minut": lg.get("fixture", {}).get("status", {}).get("elapsed", "Live")
-                    })
-                st.dataframe(pd.DataFrame(live_list), use_container_width=True)
-            else:
-                st.info("Nema učitanih live utakmica sa API-ja.")
-
-        with st.expander("🔍 Dijagnostika i sirovi parsirani podaci"):
-            st.json(parsed_matches)
-
-if refresh_mode == "Automatsko" and st.session_state["process_triggered"]:
-    time.sleep(auto_interval)
-    st.rerun()
+# INICIJALIZACIJA STANJA SOKETA I ARHIVE
+if "process_triggered" not in st.
