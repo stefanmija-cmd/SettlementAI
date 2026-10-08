@@ -289,4 +289,213 @@ if st.sidebar.button("Odjavi se"):
     st.rerun()
 
 # INICIJALIZACIJA STANJA SOKETA I ARHIVE
-if "process_triggered" not in st.
+if "process_triggered" not in st.session_state:
+    st.session_state["process_triggered"] = False
+
+if "session_mismatches" not in st.session_state:
+    st.session_state["session_mismatches"] = []
+
+# UNOS TEKSTA
+raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160, key="raw_text_input")
+
+col_btn1, col_btn2, _ = st.columns([2, 1, 3])
+
+with col_btn1:
+    if st.button("🚀 Učitaj i proveri tabelu", type="primary", use_container_width=True):
+        st.session_state["process_triggered"] = True
+        st.cache_data.clear()
+
+with col_btn2:
+    if st.button("🗑️ Očisti tekst", use_container_width=True):
+        st.session_state["process_triggered"] = False
+        st.rerun()
+
+if refresh_mode == "Automatsko":
+    st.session_state["process_triggered"] = True
+    st.cache_data.clear()
+    time.sleep(0.1)
+
+# OBRADA PODATAKA
+if raw_text and st.session_state["process_triggered"]:
+    parsed_matches = parse_copied_data(raw_text)
+    
+    if not parsed_matches:
+        st.warning("⚠️ Nije prepoznata struktura teksta. Proverite uslov kopiranja.")
+    else:
+        live_games, remaining_reqs = fetch_all_live_fixtures(api_key_input) if api_key_input else ([], "N/A")
+        
+        if remaining_reqs != "N/A":
+            st.sidebar.info(f"📊 Preostalo API zahteva: **{remaining_reqs}**")
+        
+        results = []
+        has_mismatch = False
+        count_ok, count_mismatch, count_na = 0, 0, 0
+        suggestions = []
+        
+        for m in parsed_matches:
+            ext_data = fetch_external_live_data(
+                m["Home"], 
+                m["Away"], 
+                m["ID"], 
+                live_games, 
+                st.session_state["manual_overrides"]
+            )
+            
+            ext_score = ext_data["ext_score"]
+            my_score = m["Moj Sistem Rezultat"]
+            
+            if ext_score == "N/A":
+                status_check = "NEMA PODATAKA (N/A)"
+                count_na += 1
+                
+                # Traženje predloga za spajanje
+                cand = find_best_candidate(m["Home"], m["Away"], live_games)
+                if cand:
+                    suggestions.append({"match_id": m["ID"], "my_match": m["Meč"], "candidate": cand})
+                    
+            elif my_score != ext_score:
+                status_check = "MISMATCH (NESLAGANJE)"
+                has_mismatch = True
+                count_mismatch += 1
+                
+                # Dodavanje u trajnu arhivu sesije ako već nije dodato
+                mismatch_record = {
+                    "Vreme": time.strftime("%H:%M:%S"),
+                    "ID": m["ID"],
+                    "Liga": m["Liga"],
+                    "Meč": m["Meč"],
+                    "Tvoj Sistem": my_score,
+                    "Teren / Live": ext_score
+                }
+                if not any(x["ID"] == m["ID"] and x["Tvoj Sistem"] == my_score and x["Teren / Live"] == ext_score for x in st.session_state["session_mismatches"]):
+                    st.session_state["session_mismatches"].append(mismatch_record)
+            else:
+                status_check = "OK"
+                count_ok += 1
+            
+            results.append({
+                "Status": status_check,
+                "ID": m["ID"],
+                "Oznaka": m["Oznaka"],
+                "Liga": m["Liga"],
+                "Meč": m["Meč"],
+                "Tvoj Sistem": my_score,
+                "Score2 (HT)": m["Score2 (HT)"],
+                "Teren / Live Feed": ext_score,
+                "Status Meča": ext_data["status"]
+            })
+            
+        df = pd.DataFrame(results)
+        
+        # METRIKE
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Ukupno mečeva", len(df))
+        m2.metric("Usklađeno (OK)", count_ok)
+        m3.metric("Neslaganja (MISMATCH)", count_mismatch, delta_color="inverse")
+        m4.metric("Nema podataka (N/A)", count_na)
+        
+        # BRZA PRETRAGA I FILTERI
+        st.markdown("---")
+        col_search, col_filter = st.columns([2, 2])
+        
+        with col_search:
+            search_query = st.text_input("🔍 Brza pretraga (ID, klub ili liga):", "")
+            
+        with col_filter:
+            filter_status = st.radio(
+                "Filtriraj po statusu:", 
+                ["Svi mečevi", "Samo Neslaganja (MISMATCH)", "Samo Nema Podataka (N/A)"], 
+                horizontal=True
+            )
+        
+        # FILTRIRANJE
+        if filter_status == "Samo Neslaganja (MISMATCH)":
+            df = df[df["Status"] == "MISMATCH (NESLAGANJE)"]
+        elif filter_status == "Samo Nema Podataka (N/A)":
+            df = df[df["Status"] == "NEMA PODATAKA (N/A)"]
+            
+        if search_query:
+            query = search_query.lower()
+            df = df[
+                df["ID"].astype(str).str.contains(query) | 
+                df["Meč"].str.lower().str.contains(query) | 
+                df["Liga"].str.lower().str.contains(query)
+            ]
+            
+        if has_mismatch and sound_alert:
+            play_sound_alarm(sound_choice)
+            st.error("🚨 DETEKTOVANO JE NESLAGANJE REZULTATA!")
+            
+        def highlight_status(val):
+            if val == "MISMATCH (NESLAGANJE)":
+                return 'background-color: #d32f2f; color: white; font-weight: bold;'
+            elif val == "NEMA PODATAKA (N/A)":
+                return 'background-color: #4a4a4a; color: #d1d1d1;'
+            elif val == "OK":
+                return 'background-color: #2e7d32; color: white; font-weight: bold;'
+            return ''
+
+        st.subheader("📊 Pregled utakmica")
+        st.dataframe(
+            df.style.map(highlight_status, subset=['Status']), 
+            use_container_width=True
+        )
+
+        # AUTO-ALIAS SUGGESTER (Pametni predlozi za spajanje jednim klikom)
+        if suggestions:
+            with st.expander("💡 Pametni predlozi za ručno spajanje (Jedan klik)", expanded=True):
+                st.caption("Aplikacija je pronašla potencijalne parove na API-ju za nepovezane mečeve:")
+                for sug in suggestions:
+                    c1, c2, c3 = st.columns([2, 3, 2])
+                    c1.write(f"**ID {sug['match_id']}**: {sug['my_match']}")
+                    c2.write(f"API kandidat: **{sug['candidate']}**")
+                    if c3.button(f"➕ Spoji sa '{sug['candidate']}'", key=f"sug_{sug['match_id']}"):
+                        st.session_state["manual_overrides"][str(sug['match_id'])] = {
+                            "override_search": sug['candidate'].split('-')[0].strip()
+                        }
+                        st.success(f"Uspešno spojeno! Kliknite na 'Učitaj i proveri tabelu'.")
+                        st.rerun()
+
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Preuzmi trenutni izveštaj (CSV)",
+            data=csv,
+            file_name="settlement_mismatch_report.csv",
+            mime="text/csv"
+        )
+
+# ==========================================
+# 7. ISTORIJA NESLAGANJA U TOKU SMENE
+# ==========================================
+if st.session_state["session_mismatches"]:
+    st.markdown("---")
+    st.subheader("📜 Arhiva svih detektovanih neslaganja u toku radne sesije")
+    st.caption("Ova tabela pamti sve sporne mečeve iz svih tabela koje ste učitali u toku smene.")
+    
+    mismatch_df = pd.DataFrame(st.session_state["session_mismatches"])
+    st.dataframe(mismatch_df, use_container_width=True)
+    
+    if st.button("🗑️ Obriši arhivu neslaganja"):
+        st.session_state["session_mismatches"] = []
+        st.rerun()
+
+# LIVE MONITOR I DIJAGNOSTIKA
+if raw_text and st.session_state["process_triggered"]:
+    with st.expander("📺 Pregled svih trenutno aktivnih live utakmica na API-ju"):
+        if 'live_games' in locals() and live_games:
+            live_list = []
+            for lg in live_games:
+                live_list.append({
+                    "Liga": lg.get("league", {}).get("name", ""),
+                    "Domaćin": lg.get("teams", {}).get("home", {}).get("name", ""),
+                    "Gost": lg.get("teams", {}).get("away", {}).get("name", ""),
+                    "Rezultat": f"{lg.get('goals',{}).get('home',0)}:{lg.get('goals',{}).get('away',0)}",
+                    "Minut": lg.get("fixture", {}).get("status", {}).get("elapsed", "Live")
+                })
+            st.dataframe(pd.DataFrame(live_list), use_container_width=True)
+        else:
+            st.info("Nema učitanih live utakmica sa API-ja.")
+
+if refresh_mode == "Automatsko" and st.session_state["process_triggered"]:
+    time.sleep(auto_interval)
+    st.rerun()
