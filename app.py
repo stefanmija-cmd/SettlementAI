@@ -5,7 +5,8 @@ Secrets (.streamlit/secrets.toml):
     APP_PASSWORD = "nova-jaka-lozinka"
     APISPORTS_KEY = "tvoj-api-kljuc"        # opciono
     FOOTBALLDATA_KEY = "tvoj-fd-kljuc"     # opciono (football-data.org)
-    DEFAULT_PROVIDER = "football-data.org"  # opciono
+    RAPIDAPI_KEY = "tvoj-rapidapi-kljuc"    # opciono (API-Football na RapidAPI)
+    DEFAULT_PROVIDER = "football-data.org"  # opciono ("API-Sports", "football-data.org", "RapidAPI")
 """
 import hmac
 import io
@@ -32,9 +33,11 @@ st.set_page_config(page_title="SettlementCheck", page_icon=":material/fact_check
 # ==========================================
 STATE_FILE = os.environ.get("SETTLEMENT_STATE_FILE", "settlement_state.json")
 API_URL = "https://v3.football.api-sports.io/fixtures"
+RAPIDAPI_URL = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
+RAPIDAPI_HOST = "api-football-v1.p.rapidapi.com"
 TZ = ZoneInfo("Europe/Belgrade")
 MATCH_THRESHOLD = 80  # minimalna sličnost imena timova (0-100)
-PROVIDERS = ["API-Sports", "football-data.org"]
+PROVIDERS = ["API-Sports", "football-data.org", "RapidAPI"]
 FD_URL = "https://api.football-data.org/v4/matches"
 FD_STATUS = {"IN_PLAY": "LIVE", "LIVE": "LIVE", "PAUSED": "HT", "FINISHED": "FT", "AWARDED": "FT",
              "SUSPENDED": "SUSP", "INTERRUPTED": "SUSP", "POSTPONED": "PST", "CANCELLED": "CANC",
@@ -341,6 +344,22 @@ def _request(api_key, params):
             r.headers.get("x-ratelimit-requests-limit", "N/A"), time.time())
 
 
+def _request_rapidapi(api_key, params):
+    headers = {
+        "x-rapidapi-key": api_key,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    r = requests.get(RAPIDAPI_URL, headers=headers, params=params, timeout=8)
+    r.raise_for_status()
+    body = r.json()
+    if body.get("errors"):
+        raise RuntimeError(str(body["errors"]))
+    return (body.get("response", []),
+            r.headers.get("x-ratelimit-requests-remaining", "N/A"),
+            r.headers.get("x-ratelimit-requests-limit", "N/A"),
+            time.time())
+
+
 def fd_to_fixture(m):
     """Prevodi utakmicu iz football-data.org u format koji ostatak aplikacije već koristi."""
     sc = m.get("score") or {}
@@ -377,6 +396,8 @@ def _request_fd(api_key, params):
 def _fetch_live(provider, api_key, nonce):
     if provider == "football-data.org":
         return _request_fd(api_key, {"status": "LIVE"})
+    elif provider == "RapidAPI":
+        return _request_rapidapi(api_key, {"live": "all"})
     return _request(api_key, {"live": "all"})
 
 
@@ -384,6 +405,8 @@ def _fetch_live(provider, api_key, nonce):
 def _fetch_date(provider, api_key, day, nonce):
     if provider == "football-data.org":  # UTC datum: uzimamo i sledeći dan da se ne izgube kasni mečevi
         return _request_fd(api_key, {"dateFrom": day, "dateTo": (date.fromisoformat(day) + timedelta(days=1)).isoformat()})
+    elif provider == "RapidAPI":
+        return _request_rapidapi(api_key, {"date": day, "timezone": "Europe/Belgrade"})
     return _request(api_key, {"date": day, "timezone": "Europe/Belgrade"})
 
 
@@ -601,19 +624,31 @@ if not operator_ok:
                         unsafe_allow_html=True)
 st.sidebar.header("Podešavanja")
 
-provider = st.sidebar.selectbox("Provajder podataka:", PROVIDERS, key="provider",
-                                index=1 if get_secret("DEFAULT_PROVIDER") == "football-data.org" else 0)
+def_prov = get_secret("DEFAULT_PROVIDER")
+def_idx = 1 if def_prov == "football-data.org" else (2 if def_prov == "RapidAPI" else 0)
+provider = st.sidebar.selectbox("Provajder podataka:", PROVIDERS, key="provider", index=def_idx)
+
 if st.session_state.get("last_provider") != provider:  # brojač i keš pripadaju provajderu
     for _k in ("api_remaining", "api_limit", "feed_cache"):
         st.session_state.pop(_k, None)
     st.session_state["last_provider"] = provider
-secret_name = "FOOTBALLDATA_KEY" if provider == "football-data.org" else "APISPORTS_KEY"
+
+if provider == "football-data.org":
+    secret_name = "FOOTBALLDATA_KEY"
+elif provider == "RapidAPI":
+    secret_name = "RAPIDAPI_KEY"
+else:
+    secret_name = "APISPORTS_KEY"
+
 api_key_input = st.sidebar.text_input(f"{provider} ključ (opciono, zamenjuje secrets):", type="password",
                                       key=f"key_{provider}")
 api_key = (api_key_input or str(get_secret(secret_name))).strip()
+
 if provider == "football-data.org":
     st.sidebar.caption("Besplatan plan: 10 zahteva u minuti i ograničen broj takmičenja. "
                        "Proverite i da li su rezultati uživo odloženi.")
+elif provider == "RapidAPI":
+    st.sidebar.caption("API-Football preko RapidAPI platforme. Proverite limite na vašem RapidAPI nalogu.")
 
 st.sidebar.subheader("Izvor podataka")
 include_finished = st.sidebar.checkbox("Uključi i završene mečeve (po datumu)", value=True)
