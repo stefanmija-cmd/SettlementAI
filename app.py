@@ -1,4 +1,4 @@
-"""Settlement Live Checker Pro (v2)
+"""SettlementCheck
 
 Potrebno: streamlit>=1.37, pandas, requests, rapidfuzz  (vidi requirements.txt)
 Secrets (.streamlit/secrets.toml):
@@ -22,7 +22,7 @@ import requests
 import streamlit as st
 from rapidfuzz import fuzz
 
-st.set_page_config(page_title="Settlement Live Checker Pro", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="SettlementCheck", page_icon="⚽", layout="wide")
 
 # ==========================================
 # 0. KONSTANTE
@@ -78,7 +78,7 @@ def check_password():
     if not expected:
         st.error("APP_PASSWORD nije podešen u .streamlit/secrets.toml")
         return False
-    st.title("🔒 Prijava na sistem")
+    st.title("🔒 SettlementCheck – prijava")
     with st.form("login"):
         pwd = st.text_input("Lozinka:", type="password")
         ok = st.form_submit_button("Prijavi se")
@@ -254,7 +254,8 @@ def _request(api_key, params):
     body = r.json()
     if body.get("errors"):  # API-Sports greške često dolaze sa HTTP 200
         raise RuntimeError(str(body["errors"]))
-    return body.get("response", []), r.headers.get("x-ratelimit-requests-remaining", "N/A")
+    return (body.get("response", []), r.headers.get("x-ratelimit-requests-remaining", "N/A"),
+            r.headers.get("x-ratelimit-requests-limit", "N/A"))
 
 
 # Izuzeci se ne keširaju. 'nonce' forsira svež poziv samo za ovu sesiju.
@@ -269,13 +270,13 @@ def _fetch_date(api_key, day, nonce):
 
 
 def load_fixtures(api_key, include_finished, day, nonce):
-    merged, remaining, errors = {}, "N/A", []
+    merged, remaining, limit, errors = {}, "N/A", "N/A", []
     calls = [("live", lambda: _fetch_live(api_key, nonce))]
     if include_finished:  # prvo datum, pa live da live pregazi iste mečeve
         calls.insert(0, ("datum", lambda: _fetch_date(api_key, day, nonce)))
     for name, fn in calls:
         try:
-            data, remaining = fn()
+            data, remaining, limit = fn()
             for fx in data:
                 merged[g(fx, "fixture", "id")] = fx
         except requests.HTTPError as e:
@@ -283,7 +284,7 @@ def load_fixtures(api_key, include_finished, day, nonce):
             errors.append("Prekoračen dnevni limit API zahteva!" if code == 429 else f"{name}: HTTP {code}")
         except Exception as e:
             errors.append(f"{name}: {e}")
-    return list(merged.values()), remaining, errors
+    return list(merged.values()), remaining, limit, errors
 
 
 def build_index(fixtures, use_90):
@@ -311,22 +312,8 @@ def build_index(fixtures, use_90):
 
 
 # ==========================================
-# 7. INCIDENTI (novo -> potvrđeno -> rešeno)
+# 7. INCIDENTI (aktivno -> rešeno, uz ime operatera)
 # ==========================================
-def ack_incident(key):
-    inc = st.session_state["store"]["incidents"].get(key)
-    if inc:
-        inc["stanje"] = "potvrđeno"
-        inc["operater"] = st.session_state.get("operator", "").strip()
-        save_store()
-
-
-def ack_all():
-    for key, inc in st.session_state["store"]["incidents"].items():
-        if inc["stanje"] == "novo":
-            ack_incident(key)
-
-
 def clear_resolved():
     store = st.session_state["store"]
     store["incidents"] = {k: v for k, v in store["incidents"].items() if v["stanje"] != "rešeno"}
@@ -348,10 +335,55 @@ def highlight_status(val):
     }.get(val, "")
 
 
+RESULT_STYLE = {
+    "MISMATCH (NESLAGANJE)": "color:#ff5252;font-weight:bold;",
+    "ČEKA POTVRDU": "color:#f9a825;font-weight:bold;",
+}
+DISPLAY_COLS = ["Status", "Incident", "ID", "Oznaka", "Liga", "Meč", "Rezultat",
+                "Score2 (HT)", "Status Meča", "Pouzdanost"]
+
+
+def status_banner(n_active, n_wait, n_na):
+    if n_active:
+        bg, fg, txt = "#d32f2f", "white", f"🚨 {n_active} {'NESLAGANJE' if n_active == 1 else 'NESLAGANJA'}"
+    elif n_wait:
+        bg, fg, txt = "#f9a825", "black", f"⏳ ČEKA POTVRDU: {n_wait}"
+    else:
+        bg, fg, txt = "#2e7d32", "white", "✅ NEMA NESLAGANJA" + (f" · {n_na} bez podataka" if n_na else "")
+    st.markdown(
+        f'<div style="background:{bg};color:{fg};padding:18px;border-radius:12px;text-align:center;'
+        f'font-size:1.8rem;font-weight:700;margin-bottom:12px;">{txt}</div>', unsafe_allow_html=True)
+
+
+def style_conf(v):
+    if v >= 95:
+        return "background-color:#2e7d32;color:white;"
+    if v >= 80:
+        return "background-color:#f9a825;color:black;"
+    return "background-color:#ef6c00;color:white;" if v > 0 else ""
+
+
+def style_row(row):
+    css = RESULT_STYLE.get(row["Status"], "")
+    return [css if c == "Rezultat" else "" for c in row.index]
+
+
+def render_table(d):
+    if d.empty:
+        st.caption("Nema mečeva u ovoj kategoriji.")
+        return
+    stl = d[DISPLAY_COLS].style
+    mp = stl.map if hasattr(stl, "map") else stl.applymap
+    stl = mp(highlight_status, subset=["Status"])
+    stl = mp(style_conf, subset=["Pouzdanost"])
+    stl = stl.apply(style_row, axis=1)
+    st.dataframe(stl, use_container_width=True, hide_index=True)
+
+
 # ==========================================
 # 8. SIDEBAR
 # ==========================================
-st.title("⚽ Settlement Live Checker Pro")
+st.title("⚽ SettlementCheck")
 st.sidebar.header("⚙️ Podešavanja")
 
 api_key_input = st.sidebar.text_input("API-Sports ključ (opciono, zamenjuje secrets):", type="password")
@@ -375,13 +407,18 @@ if refresh_mode == "Automatsko":
     st.sidebar.warning("⚠️ Troši do 2 API zahteva po ciklusu.")
 
 st.sidebar.subheader("🔊 Zvučna upozorenja")
-sound_alert = st.sidebar.checkbox("Zvučni alarm za NOVA neslaganja", value=True)
+sound_alert = st.sidebar.checkbox("Zvučni alarm za nova neslaganja", value=True)
 sound_choice = st.sidebar.selectbox("Vrsta zvuka:", list(SOUNDS.keys()))
 if st.sidebar.button("▶️ Probaj zvuk"):
     st.sidebar.audio(make_wav(sound_choice), format="audio/wav", autoplay=True)
 
+st.sidebar.subheader("🖥️ Prikaz")
+compact = st.sidebar.checkbox("Kompaktni režim (samo baner, brojači i tabele)", value=False)
+
 st.sidebar.subheader("👤 Operater")
-st.sidebar.text_input("Ime (upisuje se pri 'Preuzeo sam'):", key="operator")
+st.sidebar.text_input("Ime (upisuje se uz svako novo neslaganje):", key="operator")
+if not st.session_state.get("operator", "").strip():
+    st.sidebar.caption("⚠️ Upišite ime da bi se vezalo za neslaganja.")
 
 if st.sidebar.button("Odjavi se"):
     st.session_state["authenticated"] = False
@@ -401,7 +438,8 @@ def trigger_callback():
     st.session_state["refresh_nonce"] += 1  # svež API poziv za ovu sesiju
 
 
-raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160, key="raw_text_input")
+with st.expander("📋 Unos tabele", expanded=not (compact and st.session_state["process_triggered"])):
+    raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160, key="raw_text_input")
 col1, col2, _ = st.columns([2, 1, 3])
 col1.button("🚀 Učitaj i proveri tabelu", type="primary", use_container_width=True, on_click=trigger_callback)
 col2.button("🗑️ Očisti tekst", on_click=clear_text_callback, use_container_width=True)
@@ -411,12 +449,13 @@ col2.button("🗑️ Očisti tekst", on_click=clear_text_callback, use_container
 # 10. REZULTATI (fragment: osvežava se sam, UI ostaje živ)
 # ==========================================
 cfg = dict(api_key=api_key, include_finished=include_finished, day=day, use_90=use_90,
-           threshold=threshold, grace=grace, sound_alert=sound_alert, sound_choice=sound_choice)
+           threshold=threshold, grace=grace, compact=compact, sound_alert=sound_alert, sound_choice=sound_choice)
 run_every = auto_interval if (refresh_mode == "Automatsko" and st.session_state["process_triggered"]) else None
 
 
 @st.fragment(run_every=run_every)
 def results_view(text, cfg):
+    compact = cfg["compact"]
     store = st.session_state["store"]
     inc_store, overrides = store["incidents"], store["overrides"]
     index = []
@@ -426,16 +465,18 @@ def results_view(text, cfg):
         if not parsed:
             st.warning("⚠️ Nije prepoznata struktura teksta. Proverite uslov kopiranja.")
         else:
-            fixtures, remaining, errors = [], "N/A", []
+            fixtures, remaining, limit, errors = [], "N/A", "N/A", []
             if cfg["api_key"]:
-                fixtures, remaining, errors = load_fixtures(
+                fixtures, remaining, limit, errors = load_fixtures(
                     cfg["api_key"], cfg["include_finished"], cfg["day"], st.session_state["refresh_nonce"])
             else:
                 st.warning("Nedostaje API ključ (secrets ili polje u sidebar-u).")
             for e in errors:
                 st.error(f"🚨 {e}")
             if remaining != "N/A":
-                st.caption(f"📊 Preostalo API zahteva: **{remaining}**")
+                st.session_state["api_remaining"], st.session_state["api_limit"] = remaining, limit
+                if str(remaining).isdigit() and int(remaining) < 100:
+                    st.warning(f"⚠️ Ostalo je samo {remaining} API zahteva za danas!")
 
             index = build_index(fixtures, cfg["use_90"])
             by_id = {fx["id"]: fx for fx in index}
@@ -492,7 +533,8 @@ def results_view(text, cfg):
                                 inc_store[key] = {
                                     "id": mid, "liga": m["Liga"], "meč": m["Meč"], "sistem": my,
                                     "live": ext_score, "otkriveno": time.strftime("%d.%m %H:%M:%S"),
-                                    "stanje": "novo", "operater": "", "razreseno": "", "alarmed": False}
+                                    "stanje": "aktivno", "operater": st.session_state.get("operator", "").strip(),
+                                    "razreseno": "", "alarmed": False}
                                 changed = True
                             inc_state = inc_store[key]["stanje"]
                         else:
@@ -513,7 +555,7 @@ def results_view(text, cfg):
                     changed = True
 
             # Zvuk samo za nove, još neoglašene incidente
-            fresh = [i for i in inc_store.values() if i["stanje"] == "novo" and not i.get("alarmed")]
+            fresh = [i for i in inc_store.values() if i["stanje"] != "rešeno" and not i.get("alarmed")]
             if fresh and cfg["sound_alert"]:
                 st.audio(make_wav(cfg["sound_choice"]), format="audio/wav", autoplay=True)
             for i in fresh:
@@ -521,96 +563,94 @@ def results_view(text, cfg):
             if changed:
                 save_store()
 
-            # --- Aktivna neslaganja ---
+            # --- Baner + aktivna neslaganja ---
             active = {k: v for k, v in inc_store.items() if v["stanje"] != "rešeno"}
+            status_banner(len(active), counts["wait"], counts["na"])
             if active:
-                n_new = sum(v["stanje"] == "novo" for v in active.values())
-                (st.error if n_new else st.warning)(
-                    f"🚨 Nepreuzeta neslaganja: {n_new}" if n_new else "🟡 Sva aktivna neslaganja su preuzeta.")
                 with st.container(border=True):
-                    for k, v in active.items():
-                        c1, c2, c3 = st.columns([5, 2, 2])
-                        c1.write(f"**ID {v['id']}** · {v['meč']} · sistem **{v['sistem']}**, "
-                                 f"live **{v['live']}** · {v['otkriveno']}")
-                        c2.write("🔴 novo" if v["stanje"] == "novo" else f"🟡 preuzeo: {v['operater'] or '—'}")
-                        if v["stanje"] == "novo":
-                            c3.button("✋ Preuzeo sam", key=f"ack_{k}", on_click=ack_incident, args=(k,))
-                    if n_new > 1:
-                        st.button("✋ Preuzeo sve", on_click=ack_all)
+                    for v in active.values():
+                        st.markdown(f"**ID {v['id']}** · {v['meč']} · sistem **{v['sistem']}** → "
+                                    f"live :red[**{v['live']}**] · {v['otkriveno']} · 👤 {v['operater'] or '—'}")
 
             # --- Metrike ---
             df_full = pd.DataFrame(results)
+            df_full["Rezultat"] = df_full["Tvoj Sistem"] + " → " + df_full["Teren / Live Feed"]
             df_full["_r"] = df_full["Status"].map(STATUS_RANK)
             df_full = df_full.sort_values("_r", kind="stable").drop(columns="_r")
-            m1, m2, m3, m4, m5 = st.columns(5)
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
             m1.metric("Ukupno mečeva", len(df_full))
             m2.metric("Usklađeno (OK)", counts["ok"])
             m3.metric("Neslaganja", counts["mismatch"], delta_color="inverse")
             m4.metric("Čeka potvrdu", counts["wait"])
             m5.metric("Nema podataka", counts["na"])
+            m6.metric("API zahteva preostalo", st.session_state.get("api_remaining", "N/A"))
 
-            # --- Filteri ---
-            st.markdown("---")
-            cs, cf = st.columns([2, 2])
-            q = cs.text_input("🔍 Brza pretraga (ID, klub ili liga):", "", key="search_q")
-            flt = cf.radio("Filtriraj po statusu:", ["Svi mečevi", "Neslaganja (+ čeka potvrdu)", "Nema podataka"],
-                           horizontal=True, key="status_filter")
-            df = df_full
-            if flt.startswith("Neslaganja"):
-                df = df[df["Status"].isin(["MISMATCH (NESLAGANJE)", "ČEKA POTVRDU"])]
-            elif flt == "Nema podataka":
-                df = df[df["Status"].isin(["NEMA PODATAKA (N/A)", "SISTEM BEZ REZULTATA"])]
+            rem, lim = st.session_state.get("api_remaining"), st.session_state.get("api_limit")
+            if str(rem).isdigit() and str(lim).isdigit() and int(lim) > 0:
+                used_frac = 1 - int(rem) / int(lim)
+                icon = "🟢" if used_frac < 0.7 else ("🟡" if used_frac < 0.9 else "🔴")
+                st.progress(min(max(used_frac, 0.0), 1.0),
+                            text=f"{icon} API: potrošeno {int(lim) - int(rem)} od {lim} dnevnih zahteva (preostalo {rem})")
+
+            # --- Pretraga i tabovi ---
+            q = "" if compact else st.text_input("🔍 Brza pretraga (ID, klub ili liga):", "", key="search_q")
+            dq = df_full
             if q:
-                df = df[df["ID"].astype(str).str.contains(q, case=False, regex=False)
-                        | df["Meč"].str.contains(q, case=False, regex=False)
-                        | df["Liga"].str.contains(q, case=False, regex=False)]
+                dq = dq[dq["ID"].astype(str).str.contains(q, case=False, regex=False)
+                        | dq["Meč"].str.contains(q, case=False, regex=False)
+                        | dq["Liga"].str.contains(q, case=False, regex=False)]
+            groups = [
+                ("Neslaganja", dq[dq["Status"] == "MISMATCH (NESLAGANJE)"]),
+                ("Čeka potvrdu", dq[dq["Status"] == "ČEKA POTVRDU"]),
+                ("N/A", dq[dq["Status"].isin(["NEMA PODATAKA (N/A)", "SISTEM BEZ REZULTATA"])]),
+                ("Sve", dq),
+            ]
+            for tab, (name, d) in zip(st.tabs([f"{n} ({len(d)})" for n, d in groups]), groups):
+                with tab:
+                    render_table(d)
 
-            st.subheader("📊 Pregled utakmica")
-            styler = df.style
-            styler = (styler.map if hasattr(styler, "map") else styler.applymap)(highlight_status, subset=["Status"])
-            st.dataframe(styler, use_container_width=True, hide_index=True)
+            if not compact:
+                # --- Ručno spajanje + predlozi ---
+                with st.expander(f"🛠️ Ručno spajanje ({len(overrides)} sačuvanih)"):
+                    if index:
+                        mby = {m["ID"]: m for m in parsed}
+                        sel_m = st.selectbox("Meč iz tvog sistema:", [m["ID"] for m in parsed],
+                                             format_func=lambda i: f"{i} – {mby[i]['Meč']}", key="ov_match")
+                        sel_f = st.selectbox("Utakmica na API-ju:", [f["id"] for f in index],
+                                             format_func=lambda i: f"{by_id[i]['home']} - {by_id[i]['away']} "
+                                                                   f"({by_id[i]['liga']}, {by_id[i]['status']})",
+                                             key="ov_fix")
+                        st.button("💾 Sačuvaj spajanje", on_click=lambda: apply_override(mby[sel_m], by_id[sel_f]))
+                    else:
+                        st.info("Nema učitanih utakmica sa API-ja.")
+                    if overrides:
+                        st.button("Obriši sva ručna spajanja", on_click=clear_overrides)
 
-            # --- Ručno spajanje + predlozi ---
-            with st.expander(f"🛠️ Ručno spajanje ({len(overrides)} sačuvanih)"):
-                if index:
-                    mby = {m["ID"]: m for m in parsed}
-                    sel_m = st.selectbox("Meč iz tvog sistema:", [m["ID"] for m in parsed],
-                                         format_func=lambda i: f"{i} – {mby[i]['Meč']}", key="ov_match")
-                    sel_f = st.selectbox("Utakmica na API-ju:", [f["id"] for f in index],
-                                         format_func=lambda i: f"{by_id[i]['home']} - {by_id[i]['away']} "
-                                                               f"({by_id[i]['liga']}, {by_id[i]['status']})",
-                                         key="ov_fix")
-                    st.button("💾 Sačuvaj spajanje", on_click=lambda: apply_override(mby[sel_m], by_id[sel_f]))
-                else:
-                    st.info("Nema učitanih utakmica sa API-ja.")
-                if overrides:
-                    st.button("Obriši sva ručna spajanja", on_click=clear_overrides)
-
-            if suggestions:
-                with st.expander("💡 Predlozi za spajanje (jedan klik)", expanded=True):
-                    for m, cand in suggestions:
-                        c1, c2, c3 = st.columns([2, 3, 2])
-                        c1.write(f"**ID {m['ID']}**: {m['Meč']}")
-                        c2.write(f"API kandidat: **{cand['home']} - {cand['away']}** ({cand['status']})")
-                        c3.button("➕ Spoji", key=f"sug_{m['ID']}", on_click=apply_override, args=(m, cand))
+                if suggestions:
+                    with st.expander("💡 Predlozi za spajanje (jedan klik)", expanded=True):
+                        for m, cand in suggestions:
+                            c1, c2, c3 = st.columns([2, 3, 2])
+                            c1.write(f"**ID {m['ID']}**: {m['Meč']}")
+                            c2.write(f"API kandidat: **{cand['home']} - {cand['away']}** ({cand['status']})")
+                            c3.button("➕ Spoji", key=f"sug_{m['ID']}", on_click=apply_override, args=(m, cand))
 
             st.download_button("📥 Preuzmi izveštaj (CSV, svi mečevi)",
                                df_full.to_csv(index=False).encode("utf-8"),
-                               file_name="settlement_report.csv", mime="text/csv")
+                               file_name="settlementcheck_report.csv", mime="text/csv")
 
     # --- Arhiva incidenata (prikazuje se i bez učitane tabele) ---
-    if inc_store:
+    if inc_store and not compact:
         st.markdown("---")
         st.subheader("📜 Arhiva neslaganja")
         st.caption("Pamti se i posle osvežavanja stranice (settlement_state.json).")
         arch = pd.DataFrame(inc_store.values())[
             ["otkriveno", "id", "liga", "meč", "sistem", "live", "stanje", "operater", "razreseno"]]
-        arch.columns = ["Otkriveno", "ID", "Liga", "Meč", "Tvoj Sistem", "Live", "Stanje", "Preuzeo", "Rešeno"]
+        arch.columns = ["Otkriveno", "ID", "Liga", "Meč", "Tvoj Sistem", "Live", "Stanje", "Operater", "Rešeno"]
         st.dataframe(arch.iloc[::-1], use_container_width=True, hide_index=True)
         st.button("🗑️ Obriši rešena neslaganja", on_click=clear_resolved)
 
     # --- Live monitor ---
-    if index:
+    if index and not compact:
         with st.expander("📺 Sve utakmice trenutno dostupne sa API-ja"):
             st.dataframe(pd.DataFrame([{"Liga": f["liga"], "Domaćin": f["home"], "Gost": f["away"],
                                         "Rezultat": f["score"], "Status": f["status"]} for f in index]),
