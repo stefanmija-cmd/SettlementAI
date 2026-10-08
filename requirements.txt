@@ -1,7 +1,4 @@
-streamlit
-pandas
-requests
-thefuzz
-python-Levenshtein
-beautifulsoup4
-lxml
+streamlit>=1.37
+pandas>=2.0
+requests>=2.31
+rapidfuzz>=3.0
