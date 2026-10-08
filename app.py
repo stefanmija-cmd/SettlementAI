@@ -382,16 +382,17 @@ st.sidebar.header("⚙️ Podešavanja")
 api_key_input = st.sidebar.text_input("API-Sports ključ (opciono, zamenjuje secrets):", type="password")
 api_key = (api_key_input or str(get_secret("APISPORTS_KEY"))).strip()
 
+st.sidebar.subheader("👤 Operater")
+st.sidebar.text_input("Ime", key="operator")
+if not st.session_state.get("operator", "").strip():
+    st.sidebar.caption("⚠️")
+
 st.sidebar.subheader("📡 Izvor podataka")
 include_finished = st.sidebar.checkbox("Uključi i završene mečeve (po datumu)", value=True)
 day = st.sidebar.date_input("Datum:", value=date.today()).isoformat() if include_finished else ""
 use_90 = st.sidebar.checkbox("Za AET/PEN koristi rezultat posle 90 min", value=False)
 threshold = st.sidebar.slider("Prag poklapanja imena timova:", 70, 95, 80, 5)
 
-st.sidebar.subheader("👤 Operater")
-st.sidebar.text_input("Ime", key="operator")
-if not st.session_state.get("operator", "").strip():
-    st.sidebar.caption("⚠️")
 
 st.sidebar.subheader("⏱️ Tolerancija kašnjenja")
 grace = st.sidebar.slider("Neslaganje je alarm tek posle (s):", 0, 300, 60, 15,
