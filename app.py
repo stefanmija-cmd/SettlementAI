@@ -33,6 +33,7 @@ st.set_page_config(page_title="SettlementCheck", page_icon=":material/fact_check
 STATE_FILE = os.environ.get("SETTLEMENT_STATE_FILE", "settlement_state.json")
 API_URL = "https://v3.football.api-sports.io/fixtures"
 TZ = ZoneInfo("Europe/Belgrade")
+MATCH_THRESHOLD = 80  # minimalna sličnost imena timova (0-100)
 PROVIDERS = ["API-Sports", "football-data.org"]
 FD_URL = "https://api.football-data.org/v4/matches"
 FD_STATUS = {"IN_PLAY": "LIVE", "LIVE": "LIVE", "PAUSED": "HT", "FINISHED": "FT", "AWARDED": "FT",
@@ -55,11 +56,7 @@ BASE_ALIASES = {
     "inter": "inter milan",
     "ac milan": "milan",
 }
-SOUNDS = {
-    "Standardni beep": [(880, 0.25), (0, 0.1), (880, 0.25)],
-    "Kratki ping": [(1320, 0.18)],
-    "Upozorenje / Sirena": [(700, 0.3), (1000, 0.3)] * 3,
-}
+PING = [(1320, 0.18)]  # kratak ping, jedini zvuk
 STATUS_RANK = {"Neslaganje": 0, "Čeka potvrdu": 1, "Nema podataka": 2,
                "Sistem bez rezultata": 3, "OK": 4}
 
@@ -131,6 +128,8 @@ button[kind="primary"] p,[data-testid="stBaseButton-primary"] p{color:#000;font-
 [data-testid="stSidebar"] [data-baseweb="base-input"]{background:#141414 !important;color:#fff !important;border-color:#2b2b2b !important;}
 [data-testid="stSidebar"] .stButton>button{background:#141414;color:#fff;border:1px solid #333;}
 [data-testid="stSidebar"] .stButton>button:hover{border-color:var(--g);color:var(--g);}
+[data-testid="stSidebar"] [data-testid="stAlert"] p,[data-testid="stSidebar"] [data-testid="stAlert"] span{color:#1a1a1a;}
+.sc-req{background:#2a0b0b;border-left:4px solid #E5393A;color:#fff;padding:8px 10px;border-radius:4px;font-size:.85rem;margin:-6px 0 10px;}
 """
 
 LOGO_SVG = ('<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.8" '
@@ -210,9 +209,9 @@ for _k, _v in {"process_triggered": False, "refresh_nonce": 0, "pending": {}}.it
 # 3. ZVUK (generisan lokalno, bez spoljnih linkova)
 # ==========================================
 @st.cache_resource
-def make_wav(name):
+def make_wav():
     rate, frames = 22050, bytearray()
-    for freq, dur in SOUNDS[name]:
+    for freq, dur in PING:
         for i in range(int(rate * dur)):
             v = int(12000 * math.sin(2 * math.pi * freq * i / rate)) if freq else 0
             frames += struct.pack("<h", v)
@@ -595,6 +594,11 @@ def build_excel(df_full, inc_store, meta):
 # 8. SIDEBAR
 # ==========================================
 app_header()
+st.sidebar.text_input("Ime operatera (obavezno)", key="operator", placeholder="Ime i prezime")
+operator_ok = bool(st.session_state.get("operator", "").strip())
+if not operator_ok:
+    st.sidebar.markdown('<div class="sc-req">Obavezno: unesite ime operatera. Bez njega se provera ne pokreće.</div>',
+                        unsafe_allow_html=True)
 st.sidebar.header("Podešavanja")
 
 provider = st.sidebar.selectbox("Provajder podataka:", PROVIDERS, key="provider",
@@ -615,7 +619,6 @@ st.sidebar.subheader("Izvor podataka")
 include_finished = st.sidebar.checkbox("Uključi i završene mečeve (po datumu)", value=True)
 day = st.sidebar.date_input("Datum:", value=date.today()).isoformat() if include_finished else ""
 use_90 = st.sidebar.checkbox("Za AET/PEN koristi rezultat posle 90 min", value=False)
-threshold = st.sidebar.slider("Prag poklapanja imena timova:", 70, 95, 80, 5)
 
 st.sidebar.subheader("Tolerancija kašnjenja")
 grace = st.sidebar.slider("Neslaganje je alarm tek posle (s):", 0, 300, 60, 15,
@@ -630,18 +633,7 @@ if refresh_mode == "Automatsko":
                                                       if provider == "football-data.org" else ""))
 
 st.sidebar.subheader("Zvučna upozorenja")
-sound_alert = st.sidebar.checkbox("Zvučni alarm za nova neslaganja", value=True)
-sound_choice = st.sidebar.selectbox("Vrsta zvuka:", list(SOUNDS.keys()))
-if st.sidebar.button("Probaj zvuk", icon=":material/play_arrow:"):
-    st.sidebar.audio(make_wav(sound_choice), format="audio/wav", autoplay=True)
-
-st.sidebar.subheader("Prikaz")
-compact = st.sidebar.checkbox("Kompaktni režim (samo baner, brojači i tabele)", value=False)
-
-st.sidebar.subheader("Operater")
-st.sidebar.text_input("Ime (upisuje se uz svako novo neslaganje):", key="operator")
-if not st.session_state.get("operator", "").strip():
-    st.sidebar.caption("Upišite ime da bi se vezalo za neslaganja.")
+sound_alert = st.sidebar.checkbox("Zvučni ping za nova neslaganja", value=True)
 
 if st.sidebar.button("Odjavi se", icon=":material/logout:"):
     st.session_state["authenticated"] = False
@@ -661,10 +653,12 @@ def trigger_callback():
     st.session_state["refresh_nonce"] += 1  # svež API poziv za ovu sesiju
 
 
-with st.expander("Unos tabele", expanded=not (compact and st.session_state["process_triggered"])):
+with st.expander("Unos tabele", expanded=True):
     raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160, key="raw_text_input")
 col1, col2, _ = st.columns([2, 1, 3])
-col1.button("Učitaj i proveri", icon=":material/sync:", type="primary", use_container_width=True, on_click=trigger_callback)
+col1.button("Učitaj i proveri", icon=":material/sync:", type="primary", use_container_width=True,
+             on_click=trigger_callback, disabled=not operator_ok,
+             help=None if operator_ok else "Prvo unesite ime operatera u levom meniju.")
 col2.button("Očisti", icon=":material/delete:", on_click=clear_text_callback, use_container_width=True)
 
 
@@ -672,18 +666,19 @@ col2.button("Očisti", icon=":material/delete:", on_click=clear_text_callback, u
 # 10. REZULTATI (fragment: osvežava se sam, UI ostaje živ)
 # ==========================================
 cfg = dict(provider=provider, api_key=api_key, include_finished=include_finished, day=day, use_90=use_90,
-           threshold=threshold, grace=grace, compact=compact, auto=(refresh_mode == "Automatsko"), interval=auto_interval, sound_alert=sound_alert, sound_choice=sound_choice)
+           threshold=MATCH_THRESHOLD, grace=grace, auto=(refresh_mode == "Automatsko"), interval=auto_interval, sound_alert=sound_alert)
 run_every = auto_interval if (refresh_mode == "Automatsko" and st.session_state["process_triggered"]) else None
 
 
 @st.fragment(run_every=run_every)
 def results_view(text, cfg):
-    compact = cfg["compact"]
     store = st.session_state["store"]
     inc_store, overrides = store["incidents"], store["overrides"]
     index = []
 
-    if text and st.session_state["process_triggered"]:
+    if not st.session_state.get("operator", "").strip():
+        st.warning("Unesite ime operatera u levom meniju. Bez imena se provera ne pokreće.")
+    elif text and st.session_state["process_triggered"]:
         parsed = parse_copied_data(text)
         if not parsed:
             st.warning("Nije prepoznata struktura teksta. Proverite uslov kopiranja.")
@@ -782,7 +777,7 @@ def results_view(text, cfg):
             # Zvuk samo za nove, još neoglašene incidente
             fresh = [i for i in inc_store.values() if i["stanje"] != "rešeno" and not i.get("alarmed")]
             if fresh and cfg["sound_alert"]:
-                st.audio(make_wav(cfg["sound_choice"]), format="audio/wav", autoplay=True)
+                st.audio(make_wav(), format="audio/wav", autoplay=True)
             for i in fresh:
                 i["alarmed"], changed = True, True
             if changed:
@@ -833,7 +828,7 @@ def results_view(text, cfg):
                             text=f"API: potrošeno {int(lim) - int(rem)} od {lim} dnevnih zahteva (preostalo {rem})")
 
             # --- Pretraga i tabovi ---
-            q = "" if compact else st.text_input("Pretraga", "", key="search_q", placeholder="ID, klub ili liga")
+            q = st.text_input("Pretraga", "", key="search_q", placeholder="ID, klub ili liga")
             dq = df_full
             if q:
                 dq = dq[dq["ID"].astype(str).str.contains(q, case=False, regex=False)
@@ -849,30 +844,29 @@ def results_view(text, cfg):
                 with tab:
                     render_table(d)
 
-            if not compact:
-                # --- Ručno spajanje + predlozi ---
-                with st.expander(f"Ručno spajanje ({len(overrides)} sačuvanih)"):
-                    if index:
-                        mby = {m["ID"]: m for m in parsed}
-                        sel_m = st.selectbox("Meč iz tvog sistema:", [m["ID"] for m in parsed],
-                                             format_func=lambda i: f"{i} – {mby[i]['Meč']}", key="ov_match")
-                        sel_f = st.selectbox("Utakmica na API-ju:", [f["id"] for f in index],
-                                             format_func=lambda i: f"{by_id[i]['home']} - {by_id[i]['away']} "
-                                                                   f"({by_id[i]['liga']}, {by_id[i]['status']})",
-                                             key="ov_fix")
-                        st.button("Sačuvaj spajanje", on_click=lambda: apply_override(mby[sel_m], by_id[sel_f]))
-                    else:
-                        st.info("Nema učitanih utakmica sa API-ja.")
-                    if overrides:
-                        st.button("Obriši sva ručna spajanja", on_click=clear_overrides)
+            # --- Ručno spajanje + predlozi ---
+            with st.expander(f"Ručno spajanje ({len(overrides)} sačuvanih)"):
+                if index:
+                    mby = {m["ID"]: m for m in parsed}
+                    sel_m = st.selectbox("Meč iz tvog sistema:", [m["ID"] for m in parsed],
+                                         format_func=lambda i: f"{i} – {mby[i]['Meč']}", key="ov_match")
+                    sel_f = st.selectbox("Utakmica na API-ju:", [f["id"] for f in index],
+                                         format_func=lambda i: f"{by_id[i]['home']} - {by_id[i]['away']} "
+                                                               f"({by_id[i]['liga']}, {by_id[i]['status']})",
+                                         key="ov_fix")
+                    st.button("Sačuvaj spajanje", on_click=lambda: apply_override(mby[sel_m], by_id[sel_f]))
+                else:
+                    st.info("Nema učitanih utakmica sa API-ja.")
+                if overrides:
+                    st.button("Obriši sva ručna spajanja", on_click=clear_overrides)
 
-                if suggestions:
-                    with st.expander("Predlozi za spajanje (jedan klik)", expanded=True):
-                        for m, cand in suggestions:
-                            c1, c2, c3 = st.columns([2, 3, 2])
-                            c1.write(f"**ID {m['ID']}**: {m['Meč']}")
-                            c2.write(f"API kandidat: **{cand['home']} - {cand['away']}** ({cand['status']})")
-                            c3.button("Spoji", key=f"sug_{m['ID']}", on_click=apply_override, args=(m, cand))
+            if suggestions:
+                with st.expander("Predlozi za spajanje (jedan klik)", expanded=True):
+                    for m, cand in suggestions:
+                        c1, c2, c3 = st.columns([2, 3, 2])
+                        c1.write(f"**ID {m['ID']}**: {m['Meč']}")
+                        c2.write(f"API kandidat: **{cand['home']} - {cand['away']}** ({cand['status']})")
+                        c3.button("Spoji", key=f"sug_{m['ID']}", on_click=apply_override, args=(m, cand))
 
             meta = [
                 ("Generisano", datetime.now(TZ).strftime("%d.%m.%Y %H:%M:%S")),
@@ -894,7 +888,7 @@ def results_view(text, cfg):
                                file_name="settlementcheck_report.csv", mime="text/csv")
 
     # --- Arhiva incidenata (prikazuje se i bez učitane tabele) ---
-    if inc_store and not compact:
+    if inc_store:
         st.markdown("---")
         st.subheader("Arhiva neslaganja")
         st.caption("Pamti se i posle osvežavanja stranice (settlement_state.json).")
@@ -903,7 +897,7 @@ def results_view(text, cfg):
         st.button("Obriši rešena neslaganja", on_click=clear_resolved)
 
     # --- Live monitor ---
-    if index and not compact:
+    if index:
         with st.expander("Sve utakmice trenutno dostupne sa API-ja"):
             st.dataframe(pd.DataFrame([{"Liga": f["liga"], "Domaćin": f["home"], "Gost": f["away"],
                                         "Rezultat": f["score"], "Status": f["status"]} for f in index]),
