@@ -842,4 +842,72 @@ def results_view(text, cfg):
             groups = [
                 ("Neslaganja", dq[dq["Status"] == "Neslaganje"]),
                 ("Čeka potvrdu", dq[dq["Status"] == "Čeka potvrdu"]),
-                ("N/A", dq[dq["Status"].isin(["Nema podataka", "Sistem bez rezu
+                ("N/A", dq[dq["Status"].isin(["Nema podataka", "Sistem bez rezultata"])]),
+                ("Sve", dq),
+            ]
+            for tab, (name, d) in zip(st.tabs([f"{n} ({len(d)})" for n, d in groups]), groups):
+                with tab:
+                    render_table(d)
+
+            if not compact:
+                # --- Ručno spajanje + predlozi ---
+                with st.expander(f"Ručno spajanje ({len(overrides)} sačuvanih)"):
+                    if index:
+                        mby = {m["ID"]: m for m in parsed}
+                        sel_m = st.selectbox("Meč iz tvog sistema:", [m["ID"] for m in parsed],
+                                             format_func=lambda i: f"{i} – {mby[i]['Meč']}", key="ov_match")
+                        sel_f = st.selectbox("Utakmica na API-ju:", [f["id"] for f in index],
+                                             format_func=lambda i: f"{by_id[i]['home']} - {by_id[i]['away']} "
+                                                                   f"({by_id[i]['liga']}, {by_id[i]['status']})",
+                                             key="ov_fix")
+                        st.button("Sačuvaj spajanje", on_click=lambda: apply_override(mby[sel_m], by_id[sel_f]))
+                    else:
+                        st.info("Nema učitanih utakmica sa API-ja.")
+                    if overrides:
+                        st.button("Obriši sva ručna spajanja", on_click=clear_overrides)
+
+                if suggestions:
+                    with st.expander("Predlozi za spajanje (jedan klik)", expanded=True):
+                        for m, cand in suggestions:
+                            c1, c2, c3 = st.columns([2, 3, 2])
+                            c1.write(f"**ID {m['ID']}**: {m['Meč']}")
+                            c2.write(f"API kandidat: **{cand['home']} - {cand['away']}** ({cand['status']})")
+                            c3.button("Spoji", key=f"sug_{m['ID']}", on_click=apply_override, args=(m, cand))
+
+            meta = [
+                ("Generisano", datetime.now(TZ).strftime("%d.%m.%Y %H:%M:%S")),
+                ("Operater", st.session_state.get("operator", "").strip() or "—"),
+                ("Provajder", cfg["provider"]),
+                ("Podaci iz feeda", fmt_time(fetched_at) if fetched_at else "—"),
+                ("Izvor", f"uživo + završeni ({cfg['day']})" if cfg["include_finished"] else "samo uživo"),
+                ("API zahteva preostalo", st.session_state.get("api_remaining", "N/A")),
+                ("Ukupno mečeva", len(df_full)), ("Neslaganja", counts["mismatch"]),
+                ("Čeka potvrdu", counts["wait"]), ("Bez podataka", counts["na"]),
+                ("Upozorenje feeda", feed_problem or "nema"),
+            ]
+            d1, d2, _ = st.columns([2, 2, 3])
+            d1.download_button("Preuzmi Excel izveštaj", build_excel(df_full, inc_store, meta),
+                               file_name=f"settlementcheck_{datetime.now(TZ).strftime('%Y%m%d_%H%M')}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               icon=":material/download:")
+            d2.download_button("Preuzmi CSV", df_full.to_csv(index=False).encode("utf-8"),
+                               file_name="settlementcheck_report.csv", mime="text/csv")
+
+    # --- Arhiva incidenata (prikazuje se i bez učitane tabele) ---
+    if inc_store and not compact:
+        st.markdown("---")
+        st.subheader("Arhiva neslaganja")
+        st.caption("Pamti se i posle osvežavanja stranice (settlement_state.json).")
+        arch = incidents_frame(inc_store, time.time())
+        st.dataframe(arch.iloc[::-1], use_container_width=True, hide_index=True)
+        st.button("Obriši rešena neslaganja", on_click=clear_resolved)
+
+    # --- Live monitor ---
+    if index and not compact:
+        with st.expander("Sve utakmice trenutno dostupne sa API-ja"):
+            st.dataframe(pd.DataFrame([{"Liga": f["liga"], "Domaćin": f["home"], "Gost": f["away"],
+                                        "Rezultat": f["score"], "Status": f["status"]} for f in index]),
+                         use_container_width=True, hide_index=True)
+
+
+results_view(raw_text, cfg)
