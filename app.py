@@ -1,3 +1,10 @@
+"""SettlementCheck
+
+Potrebno: streamlit>=1.40, pandas, requests, rapidfuzz  (vidi requirements.txt)
+Secrets (.streamlit/secrets.toml):
+    APP_PASSWORD = "nova-jaka-lozinka"
+    APISPORTS_KEY = "tvoj-api-kljuc"        # opciono
+"""
 import hmac
 import io
 import json
@@ -8,20 +15,22 @@ import struct
 import time
 import unicodedata
 import wave
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 import streamlit as st
 from rapidfuzz import fuzz
 
-st.set_page_config(page_title="SettlementCheck", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="SettlementCheck", page_icon=":material/fact_check:", layout="wide")
 
 # ==========================================
 # 0. KONSTANTE
 # ==========================================
 STATE_FILE = os.environ.get("SETTLEMENT_STATE_FILE", "settlement_state.json")
 API_URL = "https://v3.football.api-sports.io/fixtures"
+TZ = ZoneInfo("Europe/Belgrade")
 FINISHED = {"FT", "AET", "PEN"}
 SKIP_STATUSES = {"NS", "TBD", "PST", "CANC"}
 QUALIFIERS = {"u17", "u18", "u19", "u20", "u21", "u23", "w", "women", "ii", "b", "reserves"}
@@ -39,8 +48,8 @@ SOUNDS = {
     "Kratki ping": [(1320, 0.18)],
     "Upozorenje / Sirena": [(700, 0.3), (1000, 0.3)] * 3,
 }
-STATUS_RANK = {"MISMATCH (NESLAGANJE)": 0, "ČEKA POTVRDU": 1, "NEMA PODATAKA (N/A)": 2,
-               "SISTEM BEZ REZULTATA": 3, "OK": 4}
+STATUS_RANK = {"Neslaganje": 0, "Čeka potvrdu": 1, "Nema podataka": 2,
+               "Sistem bez rezultata": 3, "OK": 4}
 
 
 def get_secret(name, default=""):
@@ -62,6 +71,75 @@ def g(d, *path, default=None):
 
 
 # ==========================================
+# DIZAJN (crna + zelena)
+# ==========================================
+CSS = """
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+:root{--g:#00A651;--gd:#007A3D;--line:#D9E0DC;--ink:#0D0F0E;}
+p,label,input,textarea,button,h1,h2,h3,h4,li,td,th,
+[data-testid="stMetricValue"],[data-testid="stMetricLabel"],[data-testid="stCaptionContainer"]
+{font-family:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;}
+.block-container{padding-top:1.4rem;max-width:1400px;}
+footer{visibility:hidden;}
+[data-testid="stHeader"]{background:transparent;}
+h1,h2,h3{font-weight:600;letter-spacing:-.01em;}
+
+.sc-header{display:flex;align-items:center;gap:14px;background:#000;border-radius:8px;padding:14px 18px;margin-bottom:16px;}
+.sc-mark{width:34px;height:34px;border-radius:7px;background:var(--g);display:grid;place-items:center;flex:none;}
+.sc-name{color:#fff;font-size:1.25rem;font-weight:600;letter-spacing:-.01em;line-height:1.2;}
+.sc-sub{color:#8FA39A;font-size:.82rem;}
+
+.sc-status{background:#000;border-left:8px solid var(--c);border-radius:6px;padding:14px 18px;margin:0 0 14px;}
+.sc-st-title{color:#fff;font-size:1.5rem;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums;}
+.sc-st-sub{color:#9AA8A1;font-size:.88rem;margin-top:2px;}
+
+[data-testid="stMetric"]{background:#fff;border:1px solid var(--line);border-radius:6px;padding:12px 14px;}
+[data-testid="stMetricLabel"] p{font-size:.78rem;color:#5B6761;}
+[data-testid="stMetricValue"]{font-size:1.7rem;font-weight:600;font-variant-numeric:tabular-nums;}
+
+.stTabs [data-baseweb="tab-list"]{gap:4px;border-bottom:1px solid var(--line);}
+.stTabs [data-baseweb="tab"]{padding:8px 14px;font-weight:500;}
+.stTabs [aria-selected="true"]{color:#000;font-weight:600;}
+.stTabs [data-baseweb="tab-highlight"]{background:var(--g);height:3px;}
+
+.stButton>button,.stDownloadButton>button{border-radius:6px;font-weight:500;}
+button[kind="primary"],[data-testid="stBaseButton-primary"]{background:var(--g);border:0;color:#000;}
+button[kind="primary"]:hover,[data-testid="stBaseButton-primary"]:hover{background:#00BD5B;color:#000;}
+button[kind="primary"] p,[data-testid="stBaseButton-primary"] p{color:#000;font-weight:600;}
+[data-testid="stExpander"]{background:#fff;border:1px solid var(--line);border-radius:6px;}
+[data-testid="stAlert"]{border-radius:6px;}
+
+[data-testid="stSidebar"]{background:#000;border-right:1px solid #1c1c1c;}
+[data-testid="stSidebar"] p,[data-testid="stSidebar"] label,[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] li{color:#E3E9E6;}
+[data-testid="stSidebar"] h2{color:#fff;font-size:1.05rem;}
+[data-testid="stSidebar"] h3{color:#7FE0A9;font-size:.85rem;font-weight:600;margin-top:.6rem;}
+[data-testid="stSidebar"] input,[data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] [data-baseweb="select"]>div,[data-testid="stSidebar"] [data-baseweb="input"],
+[data-testid="stSidebar"] [data-baseweb="base-input"]{background:#141414 !important;color:#fff !important;border-color:#2b2b2b !important;}
+[data-testid="stSidebar"] .stButton>button{background:#141414;color:#fff;border:1px solid #333;}
+[data-testid="stSidebar"] .stButton>button:hover{border-color:var(--g);color:var(--g);}
+"""
+
+LOGO_SVG = ('<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.8" '
+            'stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>')
+
+
+def inject_css():
+    st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
+
+
+def app_header():
+    st.markdown(
+        f'<div class="sc-header"><div class="sc-mark">{LOGO_SVG}</div><div>'
+        '<div class="sc-name">SettlementCheck</div><div class="sc-sub">Provera rezultata uživo</div>'
+        '</div></div>', unsafe_allow_html=True)
+
+
+inject_css()
+
+
+# ==========================================
 # 1. AUTORIZACIJA
 # ==========================================
 def check_password():
@@ -71,7 +149,7 @@ def check_password():
     if not expected:
         st.error("APP_PASSWORD nije podešen u .streamlit/secrets.toml")
         return False
-    st.title("🔒 SettlementCheck – prijava")
+    app_header()
     with st.form("login"):
         pwd = st.text_input("Lozinka:", type="password")
         ok = st.form_submit_button("Prijavi se")
@@ -248,7 +326,7 @@ def _request(api_key, params):
     if body.get("errors"):  # API-Sports greške često dolaze sa HTTP 200
         raise RuntimeError(str(body["errors"]))
     return (body.get("response", []), r.headers.get("x-ratelimit-requests-remaining", "N/A"),
-            r.headers.get("x-ratelimit-requests-limit", "N/A"))
+            r.headers.get("x-ratelimit-requests-limit", "N/A"), time.time())
 
 
 # Izuzeci se ne keširaju. 'nonce' forsira svež poziv samo za ovu sesiju.
@@ -262,14 +340,23 @@ def _fetch_date(api_key, day, nonce):
     return _request(api_key, {"date": day, "timezone": "Europe/Belgrade"})
 
 
-def load_fixtures(api_key, include_finished, day, nonce):
-    merged, remaining, limit, errors = {}, "N/A", "N/A", []
+def load_fixtures(api_key, include_finished, day, nonce, reuse=False):
+    """Vraća (fixtures, remaining, limit, fetched_at, errors). U manuelnom režimu (reuse=True)
+    ponovo se koristi poslednji uspešan odgovor dok se ne klikne 'Učitaj i proveri'."""
+    key = (hash(api_key), include_finished, day, nonce)
+    saved = st.session_state.get("feed_cache")
+    if reuse and saved and saved["key"] == key:
+        return saved["value"]
+    merged, remaining, limit, errors, stamps, live_ts = {}, "N/A", "N/A", [], [], None
     calls = [("live", lambda: _fetch_live(api_key, nonce))]
     if include_finished:  # prvo datum, pa live da live pregazi iste mečeve
         calls.insert(0, ("datum", lambda: _fetch_date(api_key, day, nonce)))
     for name, fn in calls:
         try:
-            data, remaining, limit = fn()
+            data, remaining, limit, ts = fn()
+            stamps.append(ts)
+            if name == "live":
+                live_ts = ts
             for fx in data:
                 merged[g(fx, "fixture", "id")] = fx
         except requests.HTTPError as e:
@@ -277,7 +364,10 @@ def load_fixtures(api_key, include_finished, day, nonce):
             errors.append("Prekoračen dnevni limit API zahteva!" if code == 429 else f"{name}: HTTP {code}")
         except Exception as e:
             errors.append(f"{name}: {e}")
-    return list(merged.values()), remaining, limit, errors
+    result = (list(merged.values()), remaining, limit, live_ts or (min(stamps) if stamps else None), errors)
+    if not errors:
+        st.session_state["feed_cache"] = {"key": key, "value": result}
+    return result
 
 
 def build_index(fixtures, use_90):
@@ -320,40 +410,47 @@ def clear_overrides():
 
 def highlight_status(val):
     return {
-        "MISMATCH (NESLAGANJE)": "background-color:#d32f2f;color:white;font-weight:bold;",
-        "ČEKA POTVRDU": "background-color:#f9a825;color:black;font-weight:bold;",
-        "NEMA PODATAKA (N/A)": "background-color:#4a4a4a;color:#d1d1d1;",
-        "SISTEM BEZ REZULTATA": "background-color:#6a1b9a;color:white;",
-        "OK": "background-color:#2e7d32;color:white;font-weight:bold;",
+        "Neslaganje": "background-color:#FDE3E3;color:#9B1C1C;font-weight:600;",
+        "Čeka potvrdu": "background-color:#FFF1CC;color:#7A5200;font-weight:600;",
+        "Nema podataka": "background-color:#E9EDEB;color:#4A5550;",
+        "Sistem bez rezultata": "background-color:#ECE4F6;color:#53257F;",
+        "OK": "background-color:#DDF3E6;color:#0A5A2C;font-weight:600;",
     }.get(val, "")
 
 
 RESULT_STYLE = {
-    "MISMATCH (NESLAGANJE)": "color:#ff5252;font-weight:bold;",
-    "ČEKA POTVRDU": "color:#f9a825;font-weight:bold;",
+    "Neslaganje": "color:#C62828;font-weight:700;",
+    "Čeka potvrdu": "color:#B26A00;font-weight:700;",
 }
 DISPLAY_COLS = ["Status", "Incident", "ID", "Oznaka", "Liga", "Meč", "Rezultat",
                 "Score2 (HT)", "Status Meča", "Pouzdanost"]
 
 
-def status_banner(n_active, n_wait, n_na):
+def status_banner(n_active, n_wait, n_na, n_ok, feed_problem=""):
     if n_active:
-        bg, fg, txt = "#d32f2f", "white", f"🚨 {n_active} {'NESLAGANJE' if n_active == 1 else 'NESLAGANJA'}"
+        color, title = "#E5393A", f"{n_active} {'neslaganje' if n_active == 1 else 'neslaganja'}"
+        sub = f"Čeka potvrdu: {n_wait}. Bez podataka: {n_na}."
+        if feed_problem:
+            sub += f" Upozorenje feeda: {feed_problem}."
+    elif feed_problem:
+        color, title = "#8A8F8C", "Provera nije pouzdana"
+        sub = f"{feed_problem[0].upper() + feed_problem[1:]}. Rezultati ispod mogu biti netačni."
     elif n_wait:
-        bg, fg, txt = "#f9a825", "black", f"⏳ ČEKA POTVRDU: {n_wait}"
+        color, title = "#F2A900", f"Čeka potvrdu: {n_wait}"
+        sub = "Moguće kašnjenje feeda, proverava se ponovo."
     else:
-        bg, fg, txt = "#2e7d32", "white", "✅ NEMA NESLAGANJA" + (f" · {n_na} bez podataka" if n_na else "")
-    st.markdown(
-        f'<div style="background:{bg};color:{fg};padding:18px;border-radius:12px;text-align:center;'
-        f'font-size:1.8rem;font-weight:700;margin-bottom:12px;">{txt}</div>', unsafe_allow_html=True)
+        color, title = "#00A651", "Nema neslaganja"
+        sub = f"Usklađeno: {n_ok}." + (f" Bez podataka: {n_na}." if n_na else "")
+    st.markdown(f'<div class="sc-status" style="--c:{color}"><div class="sc-st-title">{title}</div>'
+                f'<div class="sc-st-sub">{sub}</div></div>', unsafe_allow_html=True)
 
 
 def style_conf(v):
     if v >= 95:
-        return "background-color:#2e7d32;color:white;"
+        return "background-color:#DDF3E6;color:#0A5A2C;"
     if v >= 80:
-        return "background-color:#f9a825;color:black;"
-    return "background-color:#ef6c00;color:white;" if v > 0 else ""
+        return "background-color:#FFF1CC;color:#7A5200;"
+    return "background-color:#FFE1CC;color:#8A3B00;" if v > 0 else ""
 
 
 def style_row(row):
@@ -373,48 +470,118 @@ def render_table(d):
     st.dataframe(stl, use_container_width=True, hide_index=True)
 
 
+def stamp():
+    return datetime.now(TZ).strftime("%d.%m %H:%M:%S")
+
+
+def fmt_time(ts):
+    return datetime.fromtimestamp(ts, TZ).strftime("%H:%M:%S")
+
+
+def fmt_dur(sec):
+    sec = max(int(sec), 0)
+    return f"{sec // 3600} h {sec % 3600 // 60} min" if sec >= 3600 else f"{sec // 60} min {sec % 60} s"
+
+
+INC_COLS = ["Otkriveno", "ID", "Liga", "Meč", "Tvoj Sistem", "Live", "Stanje", "Operater", "Rešeno", "Trajanje"]
+EXCEL_COLS = ["Status", "ID", "Oznaka", "Liga", "Meč", "Tvoj Sistem", "Teren / Live Feed",
+              "Score2 (HT)", "Status Meča", "Pouzdanost"]
+XL_FILL = {"Neslaganje": "FDE3E3", "Čeka potvrdu": "FFF1CC", "Nema podataka": "E9EDEB",
+           "Sistem bez rezultata": "ECE4F6", "OK": "DDF3E6"}
+
+
+def incidents_frame(inc_store, now):
+    rows = []
+    for v in inc_store.values():
+        end = v.get("razreseno_ts") or (None if v["stanje"] == "rešeno" else now)
+        rows.append({
+            "Otkriveno": v["otkriveno"], "ID": v["id"], "Liga": v["liga"], "Meč": v["meč"],
+            "Tvoj Sistem": v["sistem"], "Live": v["live"], "Stanje": v["stanje"],
+            "Operater": v.get("operater", ""), "Rešeno": v.get("razreseno", ""),
+            "Trajanje": fmt_dur(end - v["ts"]) if v.get("ts") and end else ""})
+    return pd.DataFrame(rows, columns=INC_COLS)
+
+
+def build_excel(df_full, inc_store, meta):
+    """Excel izveštaj: Pregled, Neslaganja (sa trajanjem), Po ligama, Info."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    lg = df_full.groupby("Liga")["Status"].value_counts().unstack(fill_value=0)
+    lg = lg.reindex(columns=list(STATUS_RANK), fill_value=0)
+    lg["Ukupno"] = lg.sum(axis=1)
+    lg = lg.sort_values(["Neslaganje", "Nema podataka"], ascending=False).reset_index()
+    sheets = {
+        "Pregled": df_full[EXCEL_COLS],
+        "Neslaganja": incidents_frame(inc_store, time.time()),
+        "Po ligama": lg,
+        "Info": pd.DataFrame(meta, columns=["Stavka", "Vrednost"]),
+    }
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for name, d in sheets.items():
+            d.to_excel(xw, sheet_name=name, index=False)
+            ws = xw.sheets[name]
+            for c in ws[1]:
+                c.font = Font(bold=True, color="FFFFFF")
+                c.fill = PatternFill("solid", fgColor="000000")
+                c.alignment = Alignment(vertical="center")
+            ws.freeze_panes = "A2"
+            if name != "Info":
+                ws.auto_filter.ref = ws.dimensions
+            for i, col in enumerate(d.columns, 1):
+                width = max([len(str(col))] + [len(str(x)) for x in d[col].head(500)]) + 3
+                ws.column_dimensions[get_column_letter(i)].width = min(width, 45)
+            if "Status" in d.columns:
+                ci = list(d.columns).index("Status") + 1
+                for row in range(2, ws.max_row + 1):
+                    cell = ws.cell(row=row, column=ci)
+                    if cell.value in XL_FILL:
+                        cell.fill = PatternFill("solid", fgColor=XL_FILL[cell.value])
+    return buf.getvalue()
+
+
 # ==========================================
 # 8. SIDEBAR
 # ==========================================
-st.title("⚽ SettlementCheck")
-st.sidebar.header("⚙️ Podešavanja")
+app_header()
+st.sidebar.header("Podešavanja")
 
 api_key_input = st.sidebar.text_input("API-Sports ključ (opciono, zamenjuje secrets):", type="password")
 api_key = (api_key_input or str(get_secret("APISPORTS_KEY"))).strip()
 
-st.sidebar.subheader("👤 Operater")
-st.sidebar.text_input("Ime", key="operator")
-if not st.session_state.get("operator", "").strip():
-    st.sidebar.caption("⚠️")
-
-st.sidebar.subheader("📡 Izvor podataka")
+st.sidebar.subheader("Izvor podataka")
 include_finished = st.sidebar.checkbox("Uključi i završene mečeve (po datumu)", value=True)
 day = st.sidebar.date_input("Datum:", value=date.today()).isoformat() if include_finished else ""
 use_90 = st.sidebar.checkbox("Za AET/PEN koristi rezultat posle 90 min", value=False)
 threshold = st.sidebar.slider("Prag poklapanja imena timova:", 70, 95, 80, 5)
 
-
-st.sidebar.subheader("⏱️ Tolerancija kašnjenja")
+st.sidebar.subheader("Tolerancija kašnjenja")
 grace = st.sidebar.slider("Neslaganje je alarm tek posle (s):", 0, 300, 60, 15,
                           help="Završeni mečevi (FT/AET/PEN) se ne odlažu.")
 
-st.sidebar.subheader("🔄 Osvežavanje")
+st.sidebar.subheader("Osvežavanje")
 refresh_mode = st.sidebar.radio("Režim:", ["Manuelno (Ručno)", "Automatsko"], index=0)
 auto_interval = 60
 if refresh_mode == "Automatsko":
     auto_interval = st.sidebar.slider("Interval (sekunde):", 15, 300, 60, 15)
-    st.sidebar.warning("⚠️ Troši do 2 API zahteva po ciklusu.")
+    st.sidebar.warning("Troši do 2 API zahteva po ciklusu.")
 
-st.sidebar.subheader("🔊 Zvučna upozorenja")
+st.sidebar.subheader("Zvučna upozorenja")
 sound_alert = st.sidebar.checkbox("Zvučni alarm za nova neslaganja", value=True)
 sound_choice = st.sidebar.selectbox("Vrsta zvuka:", list(SOUNDS.keys()))
-if st.sidebar.button("▶️ Probaj zvuk"):
+if st.sidebar.button("Probaj zvuk", icon=":material/play_arrow:"):
     st.sidebar.audio(make_wav(sound_choice), format="audio/wav", autoplay=True)
 
-st.sidebar.subheader("🖥️ Prikaz")
+st.sidebar.subheader("Prikaz")
 compact = st.sidebar.checkbox("Kompaktni režim (samo baner, brojači i tabele)", value=False)
 
-if st.sidebar.button("Odjavi se"):
+st.sidebar.subheader("Operater")
+st.sidebar.text_input("Ime (upisuje se uz svako novo neslaganje):", key="operator")
+if not st.session_state.get("operator", "").strip():
+    st.sidebar.caption("Upišite ime da bi se vezalo za neslaganja.")
+
+if st.sidebar.button("Odjavi se", icon=":material/logout:"):
     st.session_state["authenticated"] = False
     st.rerun()
 
@@ -432,18 +599,18 @@ def trigger_callback():
     st.session_state["refresh_nonce"] += 1  # svež API poziv za ovu sesiju
 
 
-with st.expander("📋 Unos tabele", expanded=not (compact and st.session_state["process_triggered"])):
+with st.expander("Unos tabele", expanded=not (compact and st.session_state["process_triggered"])):
     raw_text = st.text_area("Zalepite tabelu iz vašeg programa (Ctrl + V):", height=160, key="raw_text_input")
 col1, col2, _ = st.columns([2, 1, 3])
-col1.button("🚀 Učitaj i proveri tabelu", type="primary", use_container_width=True, on_click=trigger_callback)
-col2.button("🗑️ Očisti tekst", on_click=clear_text_callback, use_container_width=True)
+col1.button("Učitaj i proveri", icon=":material/sync:", type="primary", use_container_width=True, on_click=trigger_callback)
+col2.button("Očisti", icon=":material/delete:", on_click=clear_text_callback, use_container_width=True)
 
 
 # ==========================================
 # 10. REZULTATI (fragment: osvežava se sam, UI ostaje živ)
 # ==========================================
 cfg = dict(api_key=api_key, include_finished=include_finished, day=day, use_90=use_90,
-           threshold=threshold, grace=grace, compact=compact, sound_alert=sound_alert, sound_choice=sound_choice)
+           threshold=threshold, grace=grace, compact=compact, auto=(refresh_mode == "Automatsko"), interval=auto_interval, sound_alert=sound_alert, sound_choice=sound_choice)
 run_every = auto_interval if (refresh_mode == "Automatsko" and st.session_state["process_triggered"]) else None
 
 
@@ -457,20 +624,21 @@ def results_view(text, cfg):
     if text and st.session_state["process_triggered"]:
         parsed = parse_copied_data(text)
         if not parsed:
-            st.warning("⚠️ Nije prepoznata struktura teksta. Proverite uslov kopiranja.")
+            st.warning("Nije prepoznata struktura teksta. Proverite uslov kopiranja.")
         else:
-            fixtures, remaining, limit, errors = [], "N/A", "N/A", []
+            fixtures, remaining, limit, fetched_at, errors = [], "N/A", "N/A", None, []
             if cfg["api_key"]:
-                fixtures, remaining, limit, errors = load_fixtures(
-                    cfg["api_key"], cfg["include_finished"], cfg["day"], st.session_state["refresh_nonce"])
+                fixtures, remaining, limit, fetched_at, errors = load_fixtures(
+                    cfg["api_key"], cfg["include_finished"], cfg["day"], st.session_state["refresh_nonce"],
+                    reuse=not cfg["auto"])
             else:
                 st.warning("Nedostaje API ključ (secrets ili polje u sidebar-u).")
             for e in errors:
-                st.error(f"🚨 {e}")
+                st.error(f"{e}")
             if remaining != "N/A":
                 st.session_state["api_remaining"], st.session_state["api_limit"] = remaining, limit
                 if str(remaining).isdigit() and int(remaining) < 100:
-                    st.warning(f"⚠️ Ostalo je samo {remaining} API zahteva za danas!")
+                    st.warning(f"Ostalo je samo {remaining} API zahteva za danas!")
 
             index = build_index(fixtures, cfg["use_90"])
             by_id = {fx["id"]: fx for fx in index}
@@ -495,7 +663,7 @@ def results_view(text, cfg):
 
                 inc_state = ""
                 if fx is None:
-                    status, ext_score, ext_status = "NEMA PODATAKA (N/A)", "N/A", note or "N/A"
+                    status, ext_score, ext_status = "Nema podataka", "N/A", note or "N/A"
                     counts["na"] += 1
                     pending.pop(mid, None)
                     cand = find_candidate(m, index)
@@ -506,7 +674,7 @@ def results_view(text, cfg):
                     ext_score = fx["score"]
                     ext_status = fx["status"] + (f" ({note})" if note else "")
                     if my == "N/A":
-                        status = "SISTEM BEZ REZULTATA"
+                        status = "Sistem bez rezultata"
                         counts["na"] += 1
                     elif my == ext_score:
                         status = "OK"
@@ -519,20 +687,20 @@ def results_view(text, cfg):
                             p = pending[mid] = {"key": key, "since": now}
                         left = cfg["grace"] - (now - p["since"])
                         if fx["short"] in FINISHED or left <= 0:
-                            status = "MISMATCH (NESLAGANJE)"
+                            status = "Neslaganje"
                             counts["mismatch"] += 1
                             current_keys.add(key)
                             inc = inc_store.get(key)
                             if inc is None or inc["stanje"] == "rešeno":
                                 inc_store[key] = {
                                     "id": mid, "liga": m["Liga"], "meč": m["Meč"], "sistem": my,
-                                    "live": ext_score, "otkriveno": time.strftime("%d.%m %H:%M:%S"),
+                                    "live": ext_score, "otkriveno": stamp(),
                                     "stanje": "aktivno", "operater": st.session_state.get("operator", "").strip(),
-                                    "razreseno": "", "alarmed": False}
+                                    "razreseno": "", "ts": now, "razreseno_ts": None, "alarmed": False}
                                 changed = True
                             inc_state = inc_store[key]["stanje"]
                         else:
-                            status = "ČEKA POTVRDU"
+                            status = "Čeka potvrdu"
                             counts["wait"] += 1
                             ext_status += f" (još {int(left)}s)"
 
@@ -545,7 +713,7 @@ def results_view(text, cfg):
             # Incidenti kojima se rezultat izjednačio (ili promenio) -> rešeno
             for key, inc in inc_store.items():
                 if inc["stanje"] != "rešeno" and inc["id"] in ids_with_data and key not in current_keys:
-                    inc["stanje"], inc["razreseno"] = "rešeno", time.strftime("%d.%m %H:%M:%S")
+                    inc["stanje"], inc["razreseno"], inc["razreseno_ts"] = "rešeno", stamp(), now
                     changed = True
 
             # Zvuk samo za nove, još neoglašene incidente
@@ -559,12 +727,27 @@ def results_view(text, cfg):
 
             # --- Baner + aktivna neslaganja ---
             active = {k: v for k, v in inc_store.items() if v["stanje"] != "rešeno"}
-            status_banner(len(active), counts["wait"], counts["na"])
+            age = (now - fetched_at) if fetched_at else None
+            problems = []
+            if not cfg["api_key"]:
+                problems.append("nema API ključa")
+            elif errors:
+                problems.append("greška pri učitavanju feeda")
+            elif not index:
+                problems.append("API nije vratio nijednu utakmicu")
+            if len(parsed) >= 5 and counts["na"] / len(parsed) >= 0.8:
+                problems.append("većina mečeva nema podataka")
+            if age is not None and cfg["auto"] and age > max(90, 3 * cfg["interval"]):
+                problems.append(f"podaci stariji od {int(age)} s")
+            feed_problem = "; ".join(problems)
+            status_banner(len(active), counts["wait"], counts["na"], counts["ok"], feed_problem)
+            st.caption(f"Podaci iz feeda: {fmt_time(fetched_at)} (pre {int(age)} s). Poslednja provera: {fmt_time(now)}."
+                       if fetched_at else f"Podaci iz feeda nisu učitani. Poslednja provera: {fmt_time(now)}.")
             if active:
                 with st.container(border=True):
                     for v in active.values():
-                        st.markdown(f"**ID {v['id']}** · {v['meč']} · sistem **{v['sistem']}** → "
-                                    f"live :red[**{v['live']}**] · {v['otkriveno']} · 👤 {v['operater'] or '—'}")
+                        st.markdown(f"**ID {v['id']}**, {v['meč']}: sistem **{v['sistem']}** → "
+                                    f"live :red[**{v['live']}**], {v['otkriveno']}, operater: {v['operater'] or '—'}")
 
             # --- Metrike ---
             df_full = pd.DataFrame(results)
@@ -582,21 +765,20 @@ def results_view(text, cfg):
             rem, lim = st.session_state.get("api_remaining"), st.session_state.get("api_limit")
             if str(rem).isdigit() and str(lim).isdigit() and int(lim) > 0:
                 used_frac = 1 - int(rem) / int(lim)
-                icon = "🟢" if used_frac < 0.7 else ("🟡" if used_frac < 0.9 else "🔴")
                 st.progress(min(max(used_frac, 0.0), 1.0),
-                            text=f"{icon} API: potrošeno {int(lim) - int(rem)} od {lim} dnevnih zahteva (preostalo {rem})")
+                            text=f"API: potrošeno {int(lim) - int(rem)} od {lim} dnevnih zahteva (preostalo {rem})")
 
             # --- Pretraga i tabovi ---
-            q = "" if compact else st.text_input("🔍 Brza pretraga (ID, klub ili liga):", "", key="search_q")
+            q = "" if compact else st.text_input("Pretraga", "", key="search_q", placeholder="ID, klub ili liga")
             dq = df_full
             if q:
                 dq = dq[dq["ID"].astype(str).str.contains(q, case=False, regex=False)
                         | dq["Meč"].str.contains(q, case=False, regex=False)
                         | dq["Liga"].str.contains(q, case=False, regex=False)]
             groups = [
-                ("Neslaganja", dq[dq["Status"] == "MISMATCH (NESLAGANJE)"]),
-                ("Čeka potvrdu", dq[dq["Status"] == "ČEKA POTVRDU"]),
-                ("N/A", dq[dq["Status"].isin(["NEMA PODATAKA (N/A)", "SISTEM BEZ REZULTATA"])]),
+                ("Neslaganja", dq[dq["Status"] == "Neslaganje"]),
+                ("Čeka potvrdu", dq[dq["Status"] == "Čeka potvrdu"]),
+                ("N/A", dq[dq["Status"].isin(["Nema podataka", "Sistem bez rezultata"])]),
                 ("Sve", dq),
             ]
             for tab, (name, d) in zip(st.tabs([f"{n} ({len(d)})" for n, d in groups]), groups):
@@ -605,7 +787,7 @@ def results_view(text, cfg):
 
             if not compact:
                 # --- Ručno spajanje + predlozi ---
-                with st.expander(f"🛠️ Ručno spajanje ({len(overrides)} sačuvanih)"):
+                with st.expander(f"Ručno spajanje ({len(overrides)} sačuvanih)"):
                     if index:
                         mby = {m["ID"]: m for m in parsed}
                         sel_m = st.selectbox("Meč iz tvog sistema:", [m["ID"] for m in parsed],
@@ -614,38 +796,50 @@ def results_view(text, cfg):
                                              format_func=lambda i: f"{by_id[i]['home']} - {by_id[i]['away']} "
                                                                    f"({by_id[i]['liga']}, {by_id[i]['status']})",
                                              key="ov_fix")
-                        st.button("💾 Sačuvaj spajanje", on_click=lambda: apply_override(mby[sel_m], by_id[sel_f]))
+                        st.button("Sačuvaj spajanje", on_click=lambda: apply_override(mby[sel_m], by_id[sel_f]))
                     else:
                         st.info("Nema učitanih utakmica sa API-ja.")
                     if overrides:
                         st.button("Obriši sva ručna spajanja", on_click=clear_overrides)
 
                 if suggestions:
-                    with st.expander("💡 Predlozi za spajanje (jedan klik)", expanded=True):
+                    with st.expander("Predlozi za spajanje (jedan klik)", expanded=True):
                         for m, cand in suggestions:
                             c1, c2, c3 = st.columns([2, 3, 2])
                             c1.write(f"**ID {m['ID']}**: {m['Meč']}")
                             c2.write(f"API kandidat: **{cand['home']} - {cand['away']}** ({cand['status']})")
-                            c3.button("➕ Spoji", key=f"sug_{m['ID']}", on_click=apply_override, args=(m, cand))
+                            c3.button("Spoji", key=f"sug_{m['ID']}", on_click=apply_override, args=(m, cand))
 
-            st.download_button("📥 Preuzmi izveštaj (CSV, svi mečevi)",
-                               df_full.to_csv(index=False).encode("utf-8"),
+            meta = [
+                ("Generisano", datetime.now(TZ).strftime("%d.%m.%Y %H:%M:%S")),
+                ("Operater", st.session_state.get("operator", "").strip() or "—"),
+                ("Podaci iz feeda", fmt_time(fetched_at) if fetched_at else "—"),
+                ("Izvor", f"uživo + završeni ({cfg['day']})" if cfg["include_finished"] else "samo uživo"),
+                ("API zahteva preostalo", st.session_state.get("api_remaining", "N/A")),
+                ("Ukupno mečeva", len(df_full)), ("Neslaganja", counts["mismatch"]),
+                ("Čeka potvrdu", counts["wait"]), ("Bez podataka", counts["na"]),
+                ("Upozorenje feeda", feed_problem or "nema"),
+            ]
+            d1, d2, _ = st.columns([2, 2, 3])
+            d1.download_button("Preuzmi Excel izveštaj", build_excel(df_full, inc_store, meta),
+                               file_name=f"settlementcheck_{datetime.now(TZ).strftime('%Y%m%d_%H%M')}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               icon=":material/download:")
+            d2.download_button("Preuzmi CSV", df_full.to_csv(index=False).encode("utf-8"),
                                file_name="settlementcheck_report.csv", mime="text/csv")
 
     # --- Arhiva incidenata (prikazuje se i bez učitane tabele) ---
     if inc_store and not compact:
         st.markdown("---")
-        st.subheader("📜 Arhiva neslaganja")
+        st.subheader("Arhiva neslaganja")
         st.caption("Pamti se i posle osvežavanja stranice (settlement_state.json).")
-        arch = pd.DataFrame(inc_store.values())[
-            ["otkriveno", "id", "liga", "meč", "sistem", "live", "stanje", "operater", "razreseno"]]
-        arch.columns = ["Otkriveno", "ID", "Liga", "Meč", "Tvoj Sistem", "Live", "Stanje", "Operater", "Rešeno"]
+        arch = incidents_frame(inc_store, time.time())
         st.dataframe(arch.iloc[::-1], use_container_width=True, hide_index=True)
-        st.button("🗑️ Obriši rešena neslaganja", on_click=clear_resolved)
+        st.button("Obriši rešena neslaganja", on_click=clear_resolved)
 
     # --- Live monitor ---
     if index and not compact:
-        with st.expander("📺 Sve utakmice trenutno dostupne sa API-ja"):
+        with st.expander("Sve utakmice trenutno dostupne sa API-ja"):
             st.dataframe(pd.DataFrame([{"Liga": f["liga"], "Domaćin": f["home"], "Gost": f["away"],
                                         "Rezultat": f["score"], "Status": f["status"]} for f in index]),
                          use_container_width=True, hide_index=True)
