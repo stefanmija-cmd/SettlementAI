@@ -25,6 +25,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from rapidfuzz import fuzz
+from flashscore_import import load_snapshot
 
 st.set_page_config(page_title="SettlementCheck", page_icon=":material/fact_check:", layout="wide")
 
@@ -41,7 +42,7 @@ SPORTAPI_BASE = "https://sportapi7.p.rapidapi.com/api/v1"
 
 TZ = ZoneInfo("Europe/Belgrade")
 MATCH_THRESHOLD = 80  # minimalna sličnost imena timova (0-100)
-PROVIDERS = ["API-Sports", "football-data.org", "SportAPI"]
+PROVIDERS = ["API-Sports", "football-data.org", "SportAPI", "Flashscore"]
 
 FD_STATUS = {
     "IN_PLAY": "LIVE", "LIVE": "LIVE", "PAUSED": "HT", "FINISHED": "FT", "AWARDED": "FT",
@@ -684,9 +685,15 @@ elif provider == "SportAPI":
 else:
     secret_name = "APISPORTS_KEY"
 
-api_key_input = st.sidebar.text_input(f"{provider} ključ (opciono, zamenjuje secrets):", type="password",
-                                      key=f"key_{provider}")
-api_key = (api_key_input or str(get_secret(secret_name))).strip()
+flashscore_upload = None
+if provider == "Flashscore":
+    api_key = ""
+    flashscore_upload = st.sidebar.file_uploader("Flashscore snimak (.json)", type=["json"])
+    st.sidebar.caption("Na Flashscore stranici pokrenite flashscoreWatcher.exportSnapshot(), pa učitajte datoteku ovde. Snimak važi 5 minuta; nije automatski feed.")
+else:
+    api_key_input = st.sidebar.text_input(f"{provider} ključ (opciono, zamenjuje secrets):", type="password",
+                                          key=f"key_{provider}")
+    api_key = (api_key_input or str(get_secret(secret_name))).strip()
 
 if provider == "football-data.org":
     st.sidebar.caption("Besplatan plan: 10 zahteva u minuti i ograničen broj takmičenja.")
@@ -694,9 +701,11 @@ elif provider == "SportAPI":
     st.sidebar.caption("SportAPI preko RapidAPI platforme (sportapi7.p.rapidapi.com).")
 
 st.sidebar.subheader("Izvor podataka")
-include_finished = st.sidebar.checkbox("Uključi i završene mečeve (po datumu)", value=True)
-day = st.sidebar.date_input("Datum:", value=date.today()).isoformat() if include_finished else ""
-use_90 = st.sidebar.checkbox("Za AET/PEN koristi rezultat posle 90 min", value=False)
+include_finished = st.sidebar.checkbox("Uključi i završene mečeve (po datumu)", value=True, disabled=provider == "Flashscore")
+day = st.sidebar.date_input("Datum:", value=date.today(), disabled=provider == "Flashscore").isoformat() if include_finished else ""
+use_90 = st.sidebar.checkbox("Za AET/PEN koristi rezultat posle 90 min", value=False, disabled=provider == "Flashscore")
+if provider == "Flashscore":
+    st.sidebar.caption("Poredi se glavni rezultat učitanih mečeva. Datum, status završetka i rezultat posle 90 minuta nisu potvrđeni snimkom.")
 
 st.sidebar.subheader("Tolerancija kašnjenja")
 grace = st.sidebar.slider("Neslaganje je alarm tek posle (s):", 0, 300, 60, 15,
@@ -707,7 +716,7 @@ refresh_mode = st.sidebar.radio("Režim:", ["Manuelno (Ručno)", "Automatsko"], 
 auto_interval = 60
 if refresh_mode == "Automatsko":
     auto_interval = st.sidebar.slider("Interval (sekunde):", 15, 300, 60, 15)
-    st.sidebar.warning("Troši do 2 API zahteva po ciklusu.")
+    st.sidebar.warning("Ponovo poredi isti snimak; za nove rezultate učitajte novi JSON." if provider == "Flashscore" else "Troši do 2 API zahteva po ciklusu.")
 
 st.sidebar.subheader("Zvučna upozorenja")
 sound_alert = st.sidebar.checkbox("Zvučni ping za nova neslaganja", value=True)
@@ -743,6 +752,7 @@ col2.button("Očisti", icon=":material/delete:", on_click=clear_text_callback, u
 # 10. REZULTATI
 # ==========================================
 cfg = dict(provider=provider, api_key=api_key, include_finished=include_finished, day=day, use_90=use_90,
+           flashscore_data=flashscore_upload.getvalue() if flashscore_upload is not None else None,
            threshold=MATCH_THRESHOLD, grace=grace, auto=(refresh_mode == "Automatsko"), interval=auto_interval, sound_alert=sound_alert)
 run_every = auto_interval if (refresh_mode == "Automatsko" and st.session_state["process_triggered"]) else None
 
@@ -761,7 +771,17 @@ def results_view(text, cfg):
             st.warning("Nije prepoznata struktura teksta. Proverite uslov kopiranja.")
         else:
             fixtures, remaining, limit, fetched_at, errors = [], "N/A", "N/A", None, []
-            if cfg["api_key"]:
+            if cfg["provider"] == "Flashscore":
+                if cfg["flashscore_data"] is None:
+                    st.warning("Učitajte Flashscore JSON snimak u levom meniju.")
+                    return
+                try:
+                    fixtures, fetched_at = load_snapshot(cfg["flashscore_data"])
+                except ValueError as exc:
+                    st.error(str(exc))
+                    return
+                st.info("Poređenje sa Flashscore snimkom. Za nove rezultate ponovo izvezite i učitajte JSON. Status meča i rezultat posle 90 minuta nisu potvrđeni.")
+            elif cfg["api_key"]:
                 fixtures, remaining, limit, fetched_at, errors = load_fixtures(
                     cfg["provider"], cfg["api_key"], cfg["include_finished"], cfg["day"], st.session_state["refresh_nonce"],
                     reuse=not cfg["auto"])
@@ -858,7 +878,7 @@ def results_view(text, cfg):
             active = {k: v for k, v in inc_store.items() if v["stanje"] != "rešeno"}
             age = (now - fetched_at) if fetched_at else None
             problems = []
-            if not cfg["api_key"]:
+            if not cfg["api_key"] and cfg["provider"] != "Flashscore":
                 problems.append("nema API ključa")
             elif errors:
                 problems.append("greška pri učitavanju feeda")
@@ -917,7 +937,7 @@ def results_view(text, cfg):
                     mby = {m["ID"]: m for m in parsed}
                     sel_m = st.selectbox("Meč iz tvog sistema:", [m["ID"] for m in parsed],
                                          format_func=lambda i: f"{i} – {mby[i]['Meč']}", key="ov_match")
-                    sel_f = st.selectbox("Utakmica na API-ju:", [f["id"] for f in index],
+                    sel_f = st.selectbox("Utakmica iz izvora:", [f["id"] for f in index],
                                          format_func=lambda i: f"{by_id[i]['home']} - {by_id[i]['away']} "
                                                                f"({by_id[i]['liga']}, {by_id[i]['status']})",
                                          key="ov_fix")
@@ -940,7 +960,7 @@ def results_view(text, cfg):
                 ("Operater", st.session_state.get("operator", "").strip() or "—"),
                 ("Provajder", cfg["provider"]),
                 ("Podaci iz feeda", fmt_time(fetched_at) if fetched_at else "—"),
-                ("Izvor", f"uživo + završeni ({cfg['day']})" if cfg["include_finished"] else "samo uživo"),
+                ("Izvor", "ručni Flashscore snimak" if cfg["provider"] == "Flashscore" else (f"uživo + završeni ({cfg['day']})" if cfg["include_finished"] else "samo uživo")),
                 ("API zahteva preostalo", st.session_state.get("api_remaining", "N/A")),
                 ("Ukupno mečeva", len(df_full)), ("Neslaganja", counts["mismatch"]),
                 ("Čeka potvrdu", counts["wait"]), ("Bez podataka", counts["na"]),
@@ -963,7 +983,7 @@ def results_view(text, cfg):
         st.button("Obriši rešena neslaganja", on_click=clear_resolved)
 
     if index:
-        with st.expander("Sve utakmice trenutno dostupne sa API-ja"):
+        with st.expander("Sve utakmice trenutno dostupne iz izvora"):
             st.dataframe(pd.DataFrame([{"Liga": f["liga"], "Domaćin": f["home"], "Gost": f["away"],
                                         "Rezultat": f["score"], "Status": f["status"]} for f in index]),
                          use_container_width=True, hide_index=True)
