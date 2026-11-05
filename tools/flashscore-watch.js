@@ -1,4 +1,15 @@
-/* Paste this file into DevTools Console on the Flashscore football results page. */
+// ==UserScript==
+// @name         SettlementAI Flashscore sender
+// @namespace    SettlementAI
+// @version      2.0.0
+// @description  Send loaded football scores to your authenticated SettlementAI receiver.
+// @match        https://www.flashscore.com/football/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
+// @connect      *
+// @run-at       document-idle
+// ==/UserScript==
+/* Install in Tampermonkey, or paste the whole file into DevTools Console. */
 (() => {
   "use strict";
 
@@ -71,6 +82,56 @@
   let lastData = "";
   let pendingData = "";
   let pendingSince = 0;
+  let bridge = null;
+
+  function disconnect() {
+    if (bridge) { bridge.active = false; bridge.abort?.(); }
+    bridge = null;
+  }
+
+  function send(data) {
+    const connection = bridge;
+    if (!connection || !connection.active || connection.busy) return;
+    const matches = JSON.parse(data);
+    if (!matches.length) return;
+    const now = Date.now();
+    if (now - connection.attemptedAt < (connection.error ? 10000 : 3000)) return;
+    if (data === connection.lastData && now - connection.sentAt < 15000) return;
+    connection.busy = true;
+    connection.attemptedAt = now;
+    const body = JSON.stringify({ schema: "settlementai.flashscore.v1", capturedAt: new Date().toISOString(), matches });
+    const complete = (status, message) => {
+      if (!connection.active) return;
+      connection.busy = false;
+      connection.abort = null;
+      if (status === 200) {
+        connection.lastData = data;
+        connection.sentAt = Date.now();
+        connection.error = "";
+      } else {
+        connection.error = message;
+        console.warn("Flashscore slanje nije uspelo:", message);
+      }
+    };
+    const headers = { "Content-Type": "application/json", "Authorization": "Bearer " + connection.token };
+    if (typeof GM_xmlhttpRequest === "function") {
+      const request = GM_xmlhttpRequest({ method: "POST", url: connection.url + "/snapshot", headers,
+        data: body, timeout: 10000, anonymous: true, redirect: "error",
+        onload: response => complete(response.status, "HTTP " + response.status),
+        onerror: () => complete(0, "Mrežna greška; proverite prijemnik i dozvole Tampermonkey."),
+        ontimeout: () => complete(0, "Prijemnik nije odgovorio za 10 sekundi.") });
+      connection.abort = () => request.abort();
+    } else {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      connection.abort = () => controller.abort();
+      fetch(connection.url + "/snapshot", { method: "POST", headers, body, signal: controller.signal,
+        credentials: "omit", redirect: "error" })
+        .then(response => complete(response.status, "HTTP " + response.status))
+        .catch(() => complete(0, "Browser je blokirao slanje ili prijemnik nije dostupan. Koristite Tampermonkey."))
+        .finally(() => clearTimeout(timeout));
+    }
+  }
   const persist = () => {
     try {
       localStorage.setItem(key, JSON.stringify(tracker.state));
@@ -93,6 +154,7 @@
       persist();
       lastData = data;
     }
+    if (Date.now() - pendingSince >= 500) send(data);
   };
   const observer = new MutationObserver(() => {
     clearTimeout(timer);
@@ -101,10 +163,24 @@
   observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
   const interval = setInterval(scan, 1000);
   window.flashscoreWatcher = {
-    stop() { stopped = true; observer.disconnect(); clearInterval(interval); clearTimeout(timer); persist(); },
+    stop() { stopped = true; disconnect(); observer.disconnect(); clearInterval(interval); clearTimeout(timer); persist(); },
+    connect(url, token) {
+      if (stopped) throw new Error("Ponovo pokrenite skriptu.");
+      const parsed = new URL(url);
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+        throw new Error("Unesite HTTPS URL prijemnika bez lozinke, query parametara ili fragmenta.");
+      }
+      if (typeof token !== "string" || token.length < 24) throw new Error("Token mora imati najmanje 24 znaka.");
+      disconnect();
+      bridge = { url: url.replace(/\/$/, ""), token, active: true, busy: false, attemptedAt: 0, sentAt: 0, lastData: "", error: "" };
+      scan();
+      console.info("Direktno slanje povezano. Proverite flashscoreWatcher.status(). Token se čuva samo u memoriji do zatvaranja stranice.");
+    },
+    disconnect,
     changes() { return structuredClone(tracker.state.changes); },
     status() { return { running: !stopped, tracked: Object.keys(tracker.state.scores).length,
-      changes: tracker.state.changes.length, persisted: !persistFailed, hidden: document.hidden, storageKey: key }; },
+      changes: tracker.state.changes.length, persisted: !persistFailed, hidden: document.hidden, storageKey: key,
+      connection: bridge ? { connected: true, sending: bridge.busy, lastSentAt: bridge.sentAt ? new Date(bridge.sentAt).toISOString() : null, error: bridge.error } : null }; },
     exportSnapshot() {
       if (stopped) throw new Error("Ponovo pokrenite skriptu pre izvoza snimka.");
       const matches = [...document.querySelectorAll('.event__match[id]')].map(readRow).filter(Boolean);
@@ -127,6 +203,18 @@
     }
   };
   scan();
+  if (typeof GM_registerMenuCommand === "function") {
+    GM_registerMenuCommand("Poveži SettlementAI prijemnik", () => {
+      const url = prompt("HTTPS URL vašeg Flashscore prijemnika (bez /snapshot):");
+      if (!url) return;
+      const token = prompt("Token prijemnika (ostaje samo u memoriji ove kartice):");
+      if (!token) return;
+      try { window.flashscoreWatcher.connect(url.trim(), token.trim()); }
+      catch (error) { alert(error.message); }
+    });
+    GM_registerMenuCommand("Status slanja", () => alert(JSON.stringify(window.flashscoreWatcher.status(), null, 2)));
+    GM_registerMenuCommand("Zaustavi slanje", () => window.flashscoreWatcher.disconnect());
+  }
   console.info("Praćenje pokrenuto. Prvi rezultat je početno stanje; sledeće promene se beleže. Izvoz: flashscoreWatcher.exportCSV(); status: flashscoreWatcher.status(); stop: flashscoreWatcher.stop(). Samo učitani mečevi, dok je stranica otvorena.");
   if (!document.querySelector('.event__match[id]')) console.warn("Nisu pronađeni mečevi. Otvorite fudbalske rezultate. Selektori možda zahtevaju prilagođavanje.");
   }

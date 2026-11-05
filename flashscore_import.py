@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 
 
-def load_snapshot(data, now=None):
+def load_snapshot(data, now=None, max_age=300):
     """Return (fixtures, capture timestamp); reject stale or malformed data."""
     if len(data) > 5_000_000:
         raise ValueError("Flashscore datoteka je prevelika (maksimum 5 MB).")
@@ -16,8 +16,9 @@ def load_snapshot(data, now=None):
             raise ValueError("Vreme snimka mora sadržati vremensku zonu.")
         current = now or datetime.now(timezone.utc)
         age = (current - captured).total_seconds()
-        if age > 300:
-            raise ValueError("Flashscore snimak je stariji od 5 minuta. Izvezite i učitajte novi snimak.")
+        if age > max_age:
+            raise ValueError("Flashscore snimak je stariji od 5 minuta. Izvezite i učitajte novi snimak." if max_age == 300
+                             else "Flashscore veza nema sveže podatke više od 45 sekundi. Proverite browser i prijemnik.")
         if age < -30:
             raise ValueError("Flashscore snimak ima vreme u budućnosti. Proverite sat uređaja.")
         matches = payload["matches"]

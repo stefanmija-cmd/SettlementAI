@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: settlementai-flashscore-bridge
+    runtime: python
+    plan: free
+    buildCommand: python --version
+    startCommand: python flashscore_bridge.py
+    healthCheckPath: /health
+    envVars:
+      - key: FLASHSCORE_BRIDGE_HOST
+        value: 0.0.0.0
+      - key: FLASHSCORE_BRIDGE_TOKEN
+        generateValue: true

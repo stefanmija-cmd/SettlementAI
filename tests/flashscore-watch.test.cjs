@@ -26,6 +26,48 @@ test('complete file starts in browser context without CommonJS and can restart',
   assert.equal(browser.flashscoreWatcher.status().running, false);
 });
 
+test('sender posts stable results, heartbeat and corrections; stop prevents sends', () => {
+  const vm = require('node:vm');
+  const source = require('node:fs').readFileSync(require.resolve('../tools/flashscore-watch.js'), 'utf8');
+  let now = Date.now(), tick, homeScore = '1';
+  const sent = [];
+  const row = { id: 'g_1_test', querySelector: selector => ({ textContent: {
+    '.event__participant--home': 'Home', '.event__participant--away': 'Away',
+    '.event__score--home': homeScore, '.event__score--away': '0'
+  }[selector] }) };
+  const browser = {
+    URL, Date: class extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } },
+    location: { hostname: 'www.flashscore.com', pathname: '/football/' },
+    localStorage: { getItem: () => null, setItem() {} },
+    document: { body: {}, hidden: false, querySelectorAll: () => [row], querySelector: () => row },
+    MutationObserver: class { observe() {} disconnect() {} },
+    setTimeout: () => 1, clearTimeout() {}, setInterval: fn => { tick = fn; return 2; }, clearInterval() {},
+    console: { info() {}, warn() {}, error() {}, table() {} }, structuredClone,
+    GM_xmlhttpRequest: options => { sent.push(options); options.onload({ status: 200 }); return { abort() {} }; }
+  };
+  browser.window = browser;
+  vm.createContext(browser);
+  vm.runInContext(source, browser);
+  browser.flashscoreWatcher.connect('https://receiver.example', 'test-token-with-at-least-24-characters');
+  assert.equal(sent.length, 0);
+  now += 1000; tick();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, 'https://receiver.example/snapshot');
+  assert.equal(JSON.parse(sent[0].data).matches[0].homeScore, '1');
+  assert.ok(!JSON.stringify(browser.flashscoreWatcher.status()).includes('test-token'));
+  now += 3000; tick();
+  assert.equal(sent.length, 1);
+  now += 15000; tick();
+  assert.equal(sent.length, 2);
+  homeScore = '0'; tick();
+  now += 3000; tick();
+  assert.equal(sent.length, 3);
+  assert.equal(JSON.parse(sent[2].data).matches[0].homeScore, '0');
+  browser.flashscoreWatcher.stop();
+  now += 20000; tick();
+  assert.equal(sent.length, 3);
+});
+
 test('baseline, goal, unchanged result, correction and reload', () => {
   let tracker = createTracker();
   assert.equal(tracker.sample([match]).length, 0);

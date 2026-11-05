@@ -26,6 +26,7 @@ import requests
 import streamlit as st
 from rapidfuzz import fuzz
 from flashscore_import import load_snapshot
+from flashscore_bridge import fetch_snapshot
 
 st.set_page_config(page_title="SettlementCheck", page_icon=":material/fact_check:", layout="wide")
 
@@ -686,10 +687,21 @@ else:
     secret_name = "APISPORTS_KEY"
 
 flashscore_upload = None
+flashscore_mode = "JSON datoteka"
+bridge_url = ""
+bridge_token = ""
 if provider == "Flashscore":
     api_key = ""
-    flashscore_upload = st.sidebar.file_uploader("Flashscore snimak (.json)", type=["json"])
-    st.sidebar.caption("Na Flashscore stranici pokrenite flashscoreWatcher.exportSnapshot(), pa učitajte datoteku ovde. Snimak važi 5 minuta; nije automatski feed.")
+    flashscore_mode = st.sidebar.radio("Flashscore veza:", ["JSON datoteka", "Direktno"], key="flashscore_mode")
+    if flashscore_mode == "Direktno":
+        bridge_url = str(get_secret("FLASHSCORE_BRIDGE_URL") or os.environ.get("FLASHSCORE_BRIDGE_URL", "")).strip()
+        bridge_token = str(get_secret("FLASHSCORE_BRIDGE_TOKEN") or os.environ.get("FLASHSCORE_BRIDGE_TOKEN", "")).strip()
+        st.sidebar.caption("Browser skripta šalje rezultate prijemniku. Za kontinuirano poređenje uključite Automatsko osvežavanje. Tabela iz internog sistema ostaje ručni unos.")
+        if not bridge_url or not bridge_token:
+            st.sidebar.warning("Podesite FLASHSCORE_BRIDGE_URL i FLASHSCORE_BRIDGE_TOKEN u secrets ili okruženju servera. Uputstvo: FLASHSCORE.md.")
+    else:
+        flashscore_upload = st.sidebar.file_uploader("Flashscore snimak (.json)", type=["json"])
+        st.sidebar.caption("Na Flashscore stranici pokrenite flashscoreWatcher.exportSnapshot(), pa učitajte datoteku ovde. Snimak važi 5 minuta.")
 else:
     api_key_input = st.sidebar.text_input(f"{provider} ključ (opciono, zamenjuje secrets):", type="password",
                                           key=f"key_{provider}")
@@ -713,10 +725,10 @@ grace = st.sidebar.slider("Neslaganje je alarm tek posle (s):", 0, 300, 60, 15,
 
 st.sidebar.subheader("Osvežavanje")
 refresh_mode = st.sidebar.radio("Režim:", ["Manuelno (Ručno)", "Automatsko"], index=0)
-auto_interval = 60
+auto_interval = 15 if provider == "Flashscore" and flashscore_mode == "Direktno" else 60
 if refresh_mode == "Automatsko":
-    auto_interval = st.sidebar.slider("Interval (sekunde):", 15, 300, 60, 15)
-    st.sidebar.warning("Ponovo poredi isti snimak; za nove rezultate učitajte novi JSON." if provider == "Flashscore" else "Troši do 2 API zahteva po ciklusu.")
+    auto_interval = st.sidebar.slider("Interval (sekunde):", 15, 300, auto_interval, 15)
+    st.sidebar.warning(("Preuzima nove rezultate iz prijemnika." if flashscore_mode == "Direktno" else "Ponovo poredi isti snimak; za nove rezultate učitajte novi JSON.") if provider == "Flashscore" else "Troši do 2 API zahteva po ciklusu.")
 
 st.sidebar.subheader("Zvučna upozorenja")
 sound_alert = st.sidebar.checkbox("Zvučni ping za nova neslaganja", value=True)
@@ -752,6 +764,7 @@ col2.button("Očisti", icon=":material/delete:", on_click=clear_text_callback, u
 # 10. REZULTATI
 # ==========================================
 cfg = dict(provider=provider, api_key=api_key, include_finished=include_finished, day=day, use_90=use_90,
+           flashscore_mode=flashscore_mode, bridge_url=bridge_url, bridge_token=bridge_token,
            flashscore_data=flashscore_upload.getvalue() if flashscore_upload is not None else None,
            threshold=MATCH_THRESHOLD, grace=grace, auto=(refresh_mode == "Automatsko"), interval=auto_interval, sound_alert=sound_alert)
 run_every = auto_interval if (refresh_mode == "Automatsko" and st.session_state["process_triggered"]) else None
@@ -772,15 +785,18 @@ def results_view(text, cfg):
         else:
             fixtures, remaining, limit, fetched_at, errors = [], "N/A", "N/A", None, []
             if cfg["provider"] == "Flashscore":
-                if cfg["flashscore_data"] is None:
+                if cfg["flashscore_mode"] != "Direktno" and cfg["flashscore_data"] is None:
                     st.warning("Učitajte Flashscore JSON snimak u levom meniju.")
                     return
                 try:
-                    fixtures, fetched_at = load_snapshot(cfg["flashscore_data"])
+                    if cfg["flashscore_mode"] == "Direktno":
+                        fixtures, fetched_at = fetch_snapshot(cfg["bridge_url"], cfg["bridge_token"])
+                    else:
+                        fixtures, fetched_at = load_snapshot(cfg["flashscore_data"])
                 except ValueError as exc:
                     st.error(str(exc))
                     return
-                st.info("Poređenje sa Flashscore snimkom. Za nove rezultate ponovo izvezite i učitajte JSON. Status meča i rezultat posle 90 minuta nisu potvrđeni.")
+                st.info("Direktna Flashscore veza. Podaci iz browsera; status završetka i rezultat posle 90 minuta nisu potvrđeni." if cfg["flashscore_mode"] == "Direktno" else "Poređenje sa Flashscore snimkom. Za nove rezultate ponovo izvezite i učitajte JSON. Status meča i rezultat posle 90 minuta nisu potvrđeni.")
             elif cfg["api_key"]:
                 fixtures, remaining, limit, fetched_at, errors = load_fixtures(
                     cfg["provider"], cfg["api_key"], cfg["include_finished"], cfg["day"], st.session_state["refresh_nonce"],
@@ -960,7 +976,7 @@ def results_view(text, cfg):
                 ("Operater", st.session_state.get("operator", "").strip() or "—"),
                 ("Provajder", cfg["provider"]),
                 ("Podaci iz feeda", fmt_time(fetched_at) if fetched_at else "—"),
-                ("Izvor", "ručni Flashscore snimak" if cfg["provider"] == "Flashscore" else (f"uživo + završeni ({cfg['day']})" if cfg["include_finished"] else "samo uživo")),
+                ("Izvor", ("direktna Flashscore veza" if cfg["flashscore_mode"] == "Direktno" else "ručni Flashscore snimak") if cfg["provider"] == "Flashscore" else (f"uživo + završeni ({cfg['day']})" if cfg["include_finished"] else "samo uživo")),
                 ("API zahteva preostalo", st.session_state.get("api_remaining", "N/A")),
                 ("Ukupno mečeva", len(df_full)), ("Neslaganja", counts["mismatch"]),
                 ("Čeka potvrdu", counts["wait"]), ("Bez podataka", counts["na"]),
